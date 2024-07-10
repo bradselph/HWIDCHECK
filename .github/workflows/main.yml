@@ -4,18 +4,26 @@ on:
   release:
     types: [created]
 
+permissions:
+  contents: write
+  packages: write
+
 jobs:
-  build-windows-amd64:
-    name: Build and Release for Windows/AMD64
+  releases-matrix:
+    name: Release Windows/AMD64 Binary
     runs-on: windows-latest
+    strategy:
+      matrix:
+        goos: [windows]
+        goarch: [amd64]
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4.1.1
+        uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: 1.22.0
+          go-version: 1.16
 
       - name: Build Binary
         run: |
@@ -28,5 +36,3 @@ jobs:
           asset_path: ./HWIDCHECK.exe
           asset_name: HWIDCHECK.exe
           asset_content_type: application/octet-stream
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
