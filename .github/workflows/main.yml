@@ -1,0 +1,32 @@
+name: Build and Release
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  build-windows-amd64:
+    name: Build and Release for Windows/AMD64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.1.1
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.22.0
+
+      - name: Build Binary
+        run: |
+          go build -o HWIDCHECK.exe -ldflags "-buildvcs=false" main.go
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./HWIDCHECK.exe
+          asset_name: HWIDCHECK.exe
+          asset_content_type: application/octet-stream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
