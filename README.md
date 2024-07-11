@@ -1,3 +1,4 @@
+[![Build and Release](https://github.com/bradselph/HWIDCHECK/actions/workflows/main.yml/badge.svg)](https://github.com/bradselph/HWIDCHECK/actions/workflows/main.yml)
 # HWID Checker
 
 HWID Checker is a Go application that allows you to easily gather various hardware information about your system, such as SMBIOS UUID, BIOS serial number, motherboard serial number, CPU serial number, and more. The application provides a user-friendly CLI menu for selecting and displaying the information, and it also offers the option to save all information to a text file.
