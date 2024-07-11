@@ -50,6 +50,7 @@ func main() {
 			runCommand("RAM (Serial Number)", "wmic", "memorychip", "get", "serialnumber")
 		case "9":
 			runCommand("Windows Product ID", "wmic", "os", "get", "serialnumber")
+			runCommand("Windows Product ID (Alternative)", "systeminfo", "|", "findstr", "/B", "/C:\"OS Serial Number\"")
 		case "10":
 			runCommand("MAC Addresses", "getmac", "/v")
 			runCommand("MAC Addresses", "powershell", "-Command", "Get-NetAdapter")
@@ -66,52 +67,59 @@ func main() {
 		}
 	}
 }
-
 func runCommand(description, command string, args ...string) {
-	fmt.Println(description)
+	fmt.Printf("Executing command: %s %s\n", command, strings.Join(args, " "))
+	_, err := exec.LookPath(command)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Command '%s' not found: %s\n", command, err)
+		return
+	}
 	cmd := exec.Command(command, args...)
 	output, err := cmd.Output()
 	if err != nil {
-		fmt.Printf("Error executing command: %s\n", err)
+		fmt.Fprintf(os.Stderr, "Error executing '%s': %s\n", description, err)
 		return
 	}
 	fmt.Println(string(output))
 }
-
 func saveAllToFile() {
 	file, err := os.Create("hwid_info.txt")
 	if err != nil {
-		fmt.Printf("Error creating file: %s\n", err)
+		fmt.Fprintf(os.Stderr, "Error creating file: %s\n", err)
 		return
 	}
 	defer file.Close()
-
 	commands := map[string][]string{
-		"SMBIOS (UUID)":               {"wmic", "csproduct", "get", "uuid"},
-		"BIOS (Serial Number)":        {"wmic", "bios", "get", "serialnumber"},
-		"Motherboard (Serial Number)": {"wmic", "baseboard", "get", "serialnumber"},
-		"Chassis (Serial Number)":     {"wmic", "systemenclosure", "get", "serialnumber"},
-		"CPU (Serial Number)":         {"wmic", "cpu", "get", "serialnumber"},
-		"HDD/SSD (Serial Number)":     {"wmic", "diskdrive", "get", "serialnumber"},
-		"Volume Information":          {"vol"},
-		"RAM (Serial Number)":         {"wmic", "memorychip", "get", "serialnumber"},
-		"Windows Product ID":          {"wmic", "os", "get", "serialnumber"},
-		"MAC Addresses":               {"getmac", "/v"},
-		"MAC Addresses (Powershell)":  {"powershell", "-Command", "Get-NetAdapter"},
-		"MAC Addresses (WMIC Path)":   {"wmic", "path", "Win32_NetworkAdapter", "where", `"MacAddress like '%%:%%:%%:%%:%%:%%'"`, "get", "Name, MacAddress"},
-		"MAC Addresses (WMIC NIC)":    {"wmic", "nic", "get", "Name, MACAddress"},
-		"MAC Addresses (IPConfig)":    {"ipconfig", "/all", "|", "findstr", `"Physical Address"`},
+		"SMBIOS (UUID)":                    {"wmic", "csproduct", "get", "uuid"},
+		"BIOS (Serial Number)":             {"wmic", "bios", "get", "serialnumber"},
+		"Motherboard (Serial Number)":      {"wmic", "baseboard", "get", "serialnumber"},
+		"Chassis (Serial Number)":          {"wmic", "systemenclosure", "get", "serialnumber"},
+		"CPU (Serial Number)":              {"wmic", "cpu", "get", "serialnumber"},
+		"HDD/SSD (Serial Number)":          {"wmic", "diskdrive", "get", "serialnumber"},
+		"Volume Information":               {"vol"},
+		"RAM (Serial Number)":              {"wmic", "memorychip", "get", "serialnumber"},
+		"Windows Product ID":               {"wmic", "os", "get", "serialnumber"},
+		"Windows Product ID (Alternative)": {"systeminfo", "|", "findstr", "/B", "/C:\"OS Serial Number\""},
+		"MAC Addresses":                    {"getmac", "/v"},
+		"MAC Addresses (Powershell)":       {"powershell", "-Command", "Get-NetAdapter"},
+		"MAC Addresses (WMIC Path)":        {"wmic", "path", "Win32_NetworkAdapter", "where", `"MacAddress like '%%:%%:%%:%%:%%:%%'"`, "get", "Name, MacAddress"},
+		"MAC Addresses (WMIC NIC)":         {"wmic", "nic", "get", "Name, MACAddress"},
+		"MAC Addresses (IPConfig)":         {"ipconfig", "/all", "|", "findstr", `"Physical Address"`},
 	}
-
 	for description, commandArgs := range commands {
+		fmt.Fprintf(file, "Executing command: %s\n", strings.Join(commandArgs, " "))
+		_, err := exec.LookPath(commandArgs[0])
+		if err != nil {
+			fmt.Fprintf(file, "Command '%s' not found: %s\n", commandArgs[0], err)
+			continue
+		}
 		cmd := exec.Command(commandArgs[0], commandArgs[1:]...)
 		output, err := cmd.Output()
 		if err != nil {
-			fmt.Fprintf(file, "Error executing %s: %s\n", description, err)
+			fmt.Fprintf(file, "Error executing '%s': %s\n", description, err)
 			continue
 		}
 		fmt.Fprintf(file, "%s:\n%s\n", description, output)
 	}
-
 	fmt.Println("All information saved to hwid_info.txt")
 }
