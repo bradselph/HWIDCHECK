@@ -15,6 +15,8 @@ HWID Checker is a Go application that allows you to easily gather various hardwa
 - Display Windows product ID
 - Display MAC addresses
 - Save all information to a text file
+- Improved error handling and informative error messages
+- Enhanced compatibility with different Windows versions
 
 ## Download
 
@@ -22,7 +24,7 @@ You can download the pre-compiled executable for Windows from the [Releases](htt
 
 ## Requirements
 
-- Primary support for Windows operating system
+- Improved compatibility with various Windows versions
 - Experimental support for other operating systems (see note below)
 
 **Note on OS Support:** While HWID Checker is primarily developed for Windows, the Go programming language allows for cross-platform compilation. Depending on the specific system calls and libraries used, it may be possible to compile and run this application on other operating systems like Linux or macOS. However, some features might be limited or require modifications to work correctly on non-Windows systems. If you're interested in using HWID Checker on another operating system, you may need to modify the source code and compile it yourself.
@@ -119,9 +121,11 @@ When you run the application, you will be presented with a menu of options to ch
    All information saved to hwid_info.txt
    ```
 
+Note: The application now provides improved error handling and more informative error messages. If a command fails to execute or encounters an error, a specific error message will be displayed, making it easier to identify and troubleshoot issues.
+
 ## Contributing
 
-If you would like to contribute to the project, please fork the repository and create a pull request with your changes. We welcome contributions that improve cross-platform compatibility or add new features.
+If you would like to contribute to the project, please fork the repository and create a pull request with your changes. We welcome contributions that improve error handling, cross-platform compatibility, or add new features.
 
 ## License
 
