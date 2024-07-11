@@ -1,6 +1,6 @@
 # HWID Checker
 
-HWID Checker is a Go application that allows you to easily gather various hardware information about your system, such as SMBIOS UUID, BIOS serial number, motherboard serial number, CPU serial number, and more. The application provides a user-friendly menu for selecting and displaying the information, and it also offers the option to save all information to a text file.
+HWID Checker is a Go application that allows you to easily gather various hardware information about your system, such as SMBIOS UUID, BIOS serial number, motherboard serial number, CPU serial number, and more. The application provides a user-friendly CLI menu for selecting and displaying the information, and it also offers the option to save all information to a text file.
 
 ## Features
 
@@ -16,27 +16,55 @@ HWID Checker is a Go application that allows you to easily gather various hardwa
 - Display MAC addresses
 - Save all information to a text file
 
+## Download
+
+You can download the pre-compiled executable for Windows from the [Releases](https://github.com/bradselph/HWIDCHECK/releases) section of this repository. Simply download the `HWIDCHECK.exe` file from the latest release.
+
 ## Requirements
 
-- Go 1.16 or higher
+- Primary support for Windows operating system
+- Experimental support for other operating systems (see note below)
+
+**Note on OS Support:** While HWID Checker is primarily developed for Windows, the Go programming language allows for cross-platform compilation. Depending on the specific system calls and libraries used, it may be possible to compile and run this application on other operating systems like Linux or macOS. However, some features might be limited or require modifications to work correctly on non-Windows systems. If you're interested in using HWID Checker on another operating system, you may need to modify the source code and compile it yourself.
 
 ## Installation
 
-1. **Clone the repository:**
+### Option 1: Using the pre-compiled executable (Windows)
+
+1. Download `HWIDCHECK.exe` from the [Releases](https://github.com/bradselph/HWIDCHECK/releases) section.
+2. Run the downloaded `HWIDCHECK.exe` file.
+
+### Option 2: Building from source
+
+If you prefer to build the application yourself, or if you want to try running it on a non-Windows system, follow these steps:
+
+1. Ensure you have Go 1.16 or higher installed on your system.
+
+2. Clone the repository:
    ```bash
    git clone https://github.com/bradselph/HWIDCHECK.git
    cd HWIDCHECK
    ```
 
-2. **Build the application:**
-   ```bash
-   go build -o HWIDCHECK
-   ```
+3. Build the application:
+   - For Windows:
+     ```bash
+     go build -o HWIDCHECK.exe
+     ```
+   - For Linux/macOS:
+     ```bash
+     go build -o HWIDCHECK
+     ```
 
-3. **Run the application:**
-   ```bash
-   ./HWIDCHECK
-   ```
+4. Run the application:
+   - For Windows:
+     ```bash
+     .\HWIDCHECK.exe
+     ```
+   - For Linux/macOS:
+     ```bash
+     ./HWIDCHECK
+     ```
 
 ## Usage
 
@@ -60,8 +88,7 @@ When you run the application, you will be presented with a menu of options to ch
 ### Example Usage
 
 1. **Select an option:** Enter the number corresponding to your choice and press Enter.
-
-   ```plaintext
+   ```
    HWID Checker
    Select an option:
    1. SMBIOS (UUID)
@@ -76,28 +103,25 @@ When you run the application, you will be presented with a menu of options to ch
    10. MAC Addresses
    11. Print All to File and Save
    12. Exit
-
    Enter your choice: 1
    ```
 
 2. **View the output:** The selected information will be displayed on the screen.
-
-   ```plaintext
+   ```
    SMBIOS (UUID)
    UUID
    XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
    ```
 
 3. **Save all information to a file:** Select option `11` to save all gathered information to a text file (`hwid_info.txt`).
-
-   ```plaintext
+   ```
    Enter your choice: 11
    All information saved to hwid_info.txt
    ```
 
 ## Contributing
 
-If you would like to contribute to the project, please fork the repository and create a pull request with your changes.
+If you would like to contribute to the project, please fork the repository and create a pull request with your changes. We welcome contributions that improve cross-platform compatibility or add new features.
 
 ## License
 
