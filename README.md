@@ -18,6 +18,9 @@ HWID Checker is a Go application that allows you to easily gather various hardwa
 - Save all information to a text file
 - Improved error handling and informative error messages
 - Enhanced compatibility with different Windows versions
+- **NEW:** PowerShell fallback commands for more reliable hardware information retrieval
+- **NEW:** Automatic command fallback when primary commands fail
+- **NEW:** Support for both WMI (legacy) and CIM (modern) PowerShell cmdlets
 
 ## Download
 
@@ -25,6 +28,8 @@ You can download the pre-compiled executable for Windows from the [Releases](htt
 
 ## Requirements
 
+- Windows operating system
+- PowerShell (any version, improved functionality with PowerShell 3.0+)
 - Improved compatibility with various Windows versions
 - Experimental support for other operating systems (see note below)
 
@@ -122,7 +127,26 @@ When you run the application, you will be presented with a menu of options to ch
    All information saved to hwid_info.txt
    ```
 
-Note: The application now provides improved error handling and more informative error messages. If a command fails to execute or encounters an error, a specific error message will be displayed, making it easier to identify and troubleshoot issues.
+### Fallback Mechanism
+
+The application now features an intelligent fallback mechanism:
+
+1. When a primary command fails (e.g., `wmic` commands), the application automatically tries alternative PowerShell commands
+2. Multiple fallback options ensure maximum compatibility across different Windows versions
+3. The application will notify you when falling back to alternative commands
+4. All fallbacks are also used when saving information to a file
+
+## Technical Details
+
+The application uses multiple methods to retrieve hardware information:
+
+1. **Primary Method:** Traditional Windows Management Instrumentation Command-line (WMIC)
+2. **Fallback Methods:**
+   - PowerShell with Get-WmiObject cmdlet
+   - PowerShell with Get-CimInstance cmdlet (preferred on newer Windows versions)
+   - Other specialized PowerShell commands where applicable
+
+This multi-layered approach ensures reliable hardware information retrieval even if some commands are deprecated or unavailable on your specific Windows version.
 
 ## Contributing
 
