@@ -407,6 +407,5 @@ func saveAllToFile() {
 			fmt.Fprintf(file, "All commands for '%s' failed\n", cmd.description)
 		}
 	}
-
 	fmt.Println("All information saved to hwid_info.txt")
 }
