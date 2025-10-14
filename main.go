@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -18,6 +19,11 @@ type CommandResult struct {
 	success bool
 	output  string
 	error   string
+}
+
+type HWIDData struct {
+	name  string
+	value string
 }
 
 func main() {
@@ -38,8 +44,11 @@ func main() {
 		fmt.Println("8. RAM (Serial Number)")
 		fmt.Println("9. Windows Product ID")
 		fmt.Println("10. MAC Addresses")
-		fmt.Println("11. Print All to File and Save")
-		fmt.Println("12. Exit")
+		fmt.Println("11. TPM and Secure Boot Status")
+		fmt.Println("12. Print All to File (Detailed)")
+		fmt.Println("13. Print Clean HWID List")
+		fmt.Println("14. Compare with Previous Scan")
+		fmt.Println("15. Exit")
 		fmt.Println("========================================")
 
 		fmt.Print("Enter your choice: ")
@@ -191,12 +200,33 @@ func main() {
 			})
 			fmt.Println("[Complete] MAC Addresses Check finished")
 		case "11":
-			saveAllToFile()
+			fmt.Println("\n[Starting] TPM and Secure Boot Check...")
+			runCommandWithFallbacks("TPM Status", Command{
+				primary: []string{"powershell", "-Command", "Get-WmiObject -Namespace ROOT\\CIMV2\\Security\\MicrosoftTpm -Class Win32_Tpm | Select-Object IsActivated_InitialValue, IsEnabled_InitialValue, IsOwned_InitialValue, ManufacturerVersion, PhysicalPresenceVersionInfo, SpecVersion"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-Tpm"},
+					{"powershell", "-Command", "Get-CimInstance -Namespace ROOT\\CIMV2\\Security\\MicrosoftTpm -ClassName Win32_Tpm"},
+				},
+			})
+			fmt.Println("\n[Checking] Secure Boot Status...")
+			runCommandWithFallbacks("Secure Boot", Command{
+				primary: []string{"powershell", "-Command", "Confirm-SecureBootUEFI"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\SecureBoot\\State' -Name UEFISecureBootEnabled | Select-Object -ExpandProperty UEFISecureBootEnabled"},
+				},
+			})
+			fmt.Println("[Complete] TPM and Secure Boot Check finished")
 		case "12":
+			saveAllToFile(false)
+		case "13":
+			saveAllToFile(true)
+		case "14":
+			compareScans(reader)
+		case "15":
 			fmt.Println("\nExiting HWID Checker...")
 			return
 		default:
-			fmt.Printf("Invalid choice '%s'. Please enter a number between 1-12.\n", choiceStr)
+			fmt.Printf("Invalid choice '%s'. Please enter a number between 1-15.\n", choiceStr)
 		}
 
 		fmt.Println("\nPress Enter to continue...")
@@ -367,18 +397,28 @@ func containsPipe(args []string) bool {
 	return false
 }
 
-func generateTimestampedFilename() string {
+func generateTimestampedFilename(cleanList bool) string {
 	timestamp := time.Now().Format("2006-01-02_15-04-05")
+	if cleanList {
+		return fmt.Sprintf("hwid_clean_%s.txt", timestamp)
+	}
 	return fmt.Sprintf("hwid_info_%s.txt", timestamp)
 }
 
-func saveAllToFile() {
-	filename := generateTimestampedFilename()
+func saveAllToFile(cleanList bool) {
+	filename := generateTimestampedFilename(cleanList)
 
-	fmt.Printf("\n========================================\n")
-	fmt.Printf("Starting full system scan...\n")
-	fmt.Printf("Output file: %s\n", filename)
-	fmt.Printf("========================================\n\n")
+	if cleanList {
+		fmt.Printf("\n========================================\n")
+		fmt.Printf("Generating clean HWID list...\n")
+		fmt.Printf("Output file: %s\n", filename)
+		fmt.Printf("========================================\n\n")
+	} else {
+		fmt.Printf("\n========================================\n")
+		fmt.Printf("Starting full system scan...\n")
+		fmt.Printf("Output file: %s\n", filename)
+		fmt.Printf("========================================\n\n")
+	}
 
 	file, err := os.Create(filename)
 	if err != nil {
@@ -396,7 +436,7 @@ func saveAllToFile() {
 		}
 	}()
 
-	if err := writeFileHeader(file); err != nil {
+	if err := writeFileHeader(file, cleanList); err != nil {
 		logError(fmt.Sprintf("[Error] Failed to write file header: %s", err))
 		return
 	}
@@ -406,6 +446,7 @@ func saveAllToFile() {
 	successCount := 0
 	failureCount := 0
 	startTime := time.Now()
+	var hwidList []HWIDData
 
 	for idx, cmdEntry := range commands {
 		progress := fmt.Sprintf("[%d/%d]", idx+1, totalCommands)
@@ -413,7 +454,20 @@ func saveAllToFile() {
 
 		fmt.Printf("%s (%.1f%%) Processing: %s\n", progress, percentComplete, cmdEntry.description)
 
-		success := processCommandForFile(file, cmdEntry, progress)
+		var success bool
+		var cleanData string
+
+		if cleanList {
+			success, cleanData = processCommandForCleanList(cmdEntry)
+			if success && cleanData != "" {
+				hwidList = append(hwidList, HWIDData{
+					name:  cmdEntry.description,
+					value: cleanData,
+				})
+			}
+		} else {
+			success = processCommandForFile(file, cmdEntry, progress)
+		}
 
 		if success {
 			successCount++
@@ -425,6 +479,12 @@ func saveAllToFile() {
 	}
 
 	elapsed := time.Since(startTime)
+
+	if cleanList {
+		if err := writeCleanList(file, hwidList); err != nil {
+			logError(fmt.Sprintf("[Error] Failed to write clean list: %s", err))
+		}
+	}
 
 	if err := writeFileSummary(file, totalCommands, successCount, failureCount, elapsed); err != nil {
 		logError(fmt.Sprintf("[Error] Failed to write summary: %s", err))
@@ -439,20 +499,381 @@ func saveAllToFile() {
 	}
 }
 
-func writeFileHeader(file *os.File) error {
+func processCommandForCleanList(cmdEntry FileCommandEntry) (bool, string) {
+	result := executeCommandWithResult(cmdEntry.command.primary)
+
+	if result.success {
+		return true, extractCleanValue(result.output)
+	}
+
+	for _, fallback := range cmdEntry.command.fallbacks {
+		if len(fallback) == 0 {
+			continue
+		}
+
+		result = executeCommandWithResult(fallback)
+		if result.success {
+			return true, extractCleanValue(result.output)
+		}
+	}
+
+	return false, ""
+}
+
+func extractCleanValue(output string) string {
+	lines := strings.Split(output, "\n")
+	var values []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		if line == "" || strings.Contains(strings.ToLower(line), "serialnumber") ||
+			strings.Contains(strings.ToLower(line), "uuid") ||
+			strings.Contains(strings.ToLower(line), "macaddress") ||
+			strings.Contains(strings.ToLower(line), "name") ||
+			strings.Contains(strings.ToLower(line), "model") ||
+			strings.Contains(strings.ToLower(line), "deviceid") ||
+			strings.Contains(strings.ToLower(line), "description") ||
+			strings.Contains(strings.ToLower(line), "friendlyname") ||
+			strings.Contains(strings.ToLower(line), "devicelocator") ||
+			strings.Contains(strings.ToLower(line), "status") ||
+			strings.Contains(strings.ToLower(line), "volumename") ||
+			strings.Contains(strings.ToLower(line), "volumeserialnumber") {
+			continue
+		}
+
+		if len(line) > 0 && !strings.HasPrefix(line, "-") {
+			values = append(values, line)
+		}
+	}
+
+	if len(values) == 0 {
+		return "Not Available"
+	}
+
+	return strings.Join(values, " | ")
+}
+
+func writeCleanList(file *os.File, hwidList []HWIDData) error {
 	if file == nil {
 		return fmt.Errorf("file is nil")
 	}
 
+	for _, hwid := range hwidList {
+		line := fmt.Sprintf("%s: %s\n", hwid.name, hwid.value)
+		if _, err := fmt.Fprint(file, line); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func compareScans(reader *bufio.Reader) {
+	fmt.Println("\n========================================")
+	fmt.Println("      Compare Previous Scans")
+	fmt.Println("========================================")
+
+	files, err := filepath.Glob("hwid_*.txt")
+	if err != nil {
+		logError(fmt.Sprintf("Error finding scan files: %s", err))
+		return
+	}
+
+	if len(files) == 0 {
+		fmt.Println("No previous scan files found.")
+		fmt.Println("Please run option 12 or 13 first to generate scan files.")
+		return
+	}
+
+	fmt.Println("\nAvailable scan files:")
+	for i, file := range files {
+		fmt.Printf("%d. %s\n", i+1, file)
+	}
+
+	fmt.Print("\nEnter first file number: ")
+	file1Str, err := reader.ReadString('\n')
+	if err != nil {
+		logError(fmt.Sprintf("Error reading input: %s", err))
+		return
+	}
+	file1Str = strings.TrimSpace(file1Str)
+
+	var file1Idx int
+	if _, err := fmt.Sscanf(file1Str, "%d", &file1Idx); err != nil || file1Idx < 1 || file1Idx > len(files) {
+		fmt.Println("Invalid file number.")
+		return
+	}
+
+	fmt.Print("Enter second file number: ")
+	file2Str, err := reader.ReadString('\n')
+	if err != nil {
+		logError(fmt.Sprintf("Error reading input: %s", err))
+		return
+	}
+	file2Str = strings.TrimSpace(file2Str)
+
+	var file2Idx int
+	if _, err := fmt.Sscanf(file2Str, "%d", &file2Idx); err != nil || file2Idx < 1 || file2Idx > len(files) {
+		fmt.Println("Invalid file number.")
+		return
+	}
+
+	file1Path := files[file1Idx-1]
+	file2Path := files[file2Idx-1]
+
+	fmt.Printf("\nComparing:\n  File 1: %s\n  File 2: %s\n\n", file1Path, file2Path)
+
+	data1, err := parseHWIDFile(file1Path)
+	if err != nil {
+		logError(fmt.Sprintf("Error reading file 1: %s", err))
+		return
+	}
+
+	data2, err := parseHWIDFile(file2Path)
+	if err != nil {
+		logError(fmt.Sprintf("Error reading file 2: %s", err))
+		return
+	}
+
+	compareResults := compareHWIDData(data1, data2)
+
+	outputFilename := fmt.Sprintf("hwid_comparison_%s.txt", time.Now().Format("2006-01-02_15-04-05"))
+	outputFile, err := os.Create(outputFilename)
+	if err != nil {
+		logError(fmt.Sprintf("Error creating comparison file: %s", err))
+		return
+	}
+	defer func() {
+		if closeErr := outputFile.Close(); closeErr != nil {
+			logError(fmt.Sprintf("Error closing comparison file: %s", closeErr))
+		}
+	}()
+
 	header := fmt.Sprintf(
 		"========================================\n"+
-			"  Hardware ID Information Report\n"+
+			"     HWID Comparison Report\n"+
 			"========================================\n"+
-			"Generated: %s\n"+
-			"System: Windows\n"+
+			"File 1: %s\n"+
+			"File 2: %s\n"+
+			"Comparison Date: %s\n"+
 			"========================================\n\n",
+		file1Path,
+		file2Path,
 		time.Now().Format("2006-01-02 15:04:05"),
 	)
+
+	if _, err := fmt.Fprint(outputFile, header); err != nil {
+		logError(fmt.Sprintf("Error writing header: %s", err))
+	}
+
+	fmt.Println("Comparison Results:")
+	fmt.Println("========================================")
+
+	unchangedCount := 0
+	changedCount := 0
+	addedCount := 0
+	removedCount := 0
+
+	for _, result := range compareResults {
+		var statusLine string
+		switch result.status {
+		case "UNCHANGED":
+			statusLine = fmt.Sprintf("[=] %s: %s\n", result.name, result.value1)
+			unchangedCount++
+		case "CHANGED":
+			statusLine = fmt.Sprintf("[!] %s:\n    File 1: %s\n    File 2: %s\n", result.name, result.value1, result.value2)
+			changedCount++
+			fmt.Printf("[CHANGED] %s\n", result.name)
+		case "ADDED":
+			statusLine = fmt.Sprintf("[+] %s: %s (only in File 2)\n", result.name, result.value2)
+			addedCount++
+			fmt.Printf("[ADDED] %s\n", result.name)
+		case "REMOVED":
+			statusLine = fmt.Sprintf("[-] %s: %s (only in File 1)\n", result.name, result.value1)
+			removedCount++
+			fmt.Printf("[REMOVED] %s\n", result.name)
+		}
+
+		if _, err := fmt.Fprint(outputFile, statusLine); err != nil {
+			logError(fmt.Sprintf("Error writing comparison line: %s", err))
+		}
+	}
+
+	summary := fmt.Sprintf(
+		"\n========================================\n"+
+			"        Comparison Summary\n"+
+			"========================================\n"+
+			"Total Items: %d\n"+
+			"Unchanged: %d\n"+
+			"Changed: %d\n"+
+			"Added: %d\n"+
+			"Removed: %d\n"+
+			"========================================\n",
+		len(compareResults),
+		unchangedCount,
+		changedCount,
+		addedCount,
+		removedCount,
+	)
+
+	if _, err := fmt.Fprint(outputFile, summary); err != nil {
+		logError(fmt.Sprintf("Error writing summary: %s", err))
+	}
+
+	fmt.Println("========================================")
+	fmt.Printf("Unchanged: %d\n", unchangedCount)
+	fmt.Printf("Changed: %d\n", changedCount)
+	fmt.Printf("Added: %d\n", addedCount)
+	fmt.Printf("Removed: %d\n", removedCount)
+	fmt.Printf("\nDetailed comparison saved to: %s\n", outputFilename)
+}
+
+type ComparisonResult struct {
+	name   string
+	status string
+	value1 string
+	value2 string
+}
+
+func parseHWIDFile(filename string) (map[string]string, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			logError(fmt.Sprintf("Error closing file: %s", closeErr))
+		}
+	}()
+
+	data := make(map[string]string)
+	scanner := bufio.NewScanner(file)
+	currentKey := ""
+	var currentValue strings.Builder
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if strings.HasPrefix(line, "[") && strings.Contains(line, "]") {
+			if currentKey != "" && currentValue.Len() > 0 {
+				data[currentKey] = strings.TrimSpace(currentValue.String())
+			}
+
+			parts := strings.SplitN(line, "]", 2)
+			if len(parts) == 2 {
+				currentKey = strings.TrimSpace(parts[1])
+				currentValue.Reset()
+			}
+		} else if strings.Contains(line, ":") && !strings.Contains(line, "Output:") && !strings.Contains(line, "Status:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				data[key] = value
+			}
+		} else if currentKey != "" && strings.TrimSpace(line) != "" &&
+			!strings.HasPrefix(line, "=") &&
+			!strings.HasPrefix(line, "Command:") &&
+			!strings.HasPrefix(line, "Status:") &&
+			!strings.HasPrefix(line, "Primary") &&
+			!strings.Contains(line, "Report") {
+			if currentValue.Len() > 0 {
+				currentValue.WriteString(" | ")
+			}
+			currentValue.WriteString(strings.TrimSpace(line))
+		}
+	}
+
+	if currentKey != "" && currentValue.Len() > 0 {
+		data[currentKey] = strings.TrimSpace(currentValue.String())
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return data, nil
+}
+
+func compareHWIDData(data1, data2 map[string]string) []ComparisonResult {
+	var results []ComparisonResult
+	allKeys := make(map[string]bool)
+
+	for key := range data1 {
+		allKeys[key] = true
+	}
+	for key := range data2 {
+		allKeys[key] = true
+	}
+
+	for key := range allKeys {
+		val1, exists1 := data1[key]
+		val2, exists2 := data2[key]
+
+		if exists1 && exists2 {
+			if val1 == val2 {
+				results = append(results, ComparisonResult{
+					name:   key,
+					status: "UNCHANGED",
+					value1: val1,
+					value2: val2,
+				})
+			} else {
+				results = append(results, ComparisonResult{
+					name:   key,
+					status: "CHANGED",
+					value1: val1,
+					value2: val2,
+				})
+			}
+		} else if exists1 {
+			results = append(results, ComparisonResult{
+				name:   key,
+				status: "REMOVED",
+				value1: val1,
+				value2: "",
+			})
+		} else {
+			results = append(results, ComparisonResult{
+				name:   key,
+				status: "ADDED",
+				value1: "",
+				value2: val2,
+			})
+		}
+	}
+
+	return results
+}
+
+func writeFileHeader(file *os.File, cleanList bool) error {
+	if file == nil {
+		return fmt.Errorf("file is nil")
+	}
+
+	var header string
+	if cleanList {
+		header = fmt.Sprintf(
+			"========================================\n"+
+				"    Clean HWID List\n"+
+				"========================================\n"+
+				"Generated: %s\n"+
+				"System: Windows\n"+
+				"========================================\n\n",
+			time.Now().Format("2006-01-02 15:04:05"),
+		)
+	} else {
+		header = fmt.Sprintf(
+			"========================================\n"+
+				"  Hardware ID Information Report\n"+
+				"========================================\n"+
+				"Generated: %s\n"+
+				"System: Windows\n"+
+				"========================================\n\n",
+			time.Now().Format("2006-01-02 15:04:05"),
+		)
+	}
 
 	_, err := fmt.Fprint(file, header)
 	return err
@@ -600,6 +1021,19 @@ func buildCommandList() []FileCommandEntry {
 			primary: []string{"ipconfig", "/all", "|", "findstr", `"Physical Address"`},
 			fallbacks: [][]string{
 				{"powershell", "-Command", "ipconfig /all | Select-String 'Physical Address'"},
+			},
+		}},
+		{"TPM Status", Command{
+			primary: []string{"powershell", "-Command", "Get-WmiObject -Namespace ROOT\\CIMV2\\Security\\MicrosoftTpm -Class Win32_Tpm | Select-Object IsActivated_InitialValue, IsEnabled_InitialValue, IsOwned_InitialValue, ManufacturerVersion, PhysicalPresenceVersionInfo, SpecVersion"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-Tpm"},
+				{"powershell", "-Command", "Get-CimInstance -Namespace ROOT\\CIMV2\\Security\\MicrosoftTpm -ClassName Win32_Tpm"},
+			},
+		}},
+		{"Secure Boot", Command{
+			primary: []string{"powershell", "-Command", "Confirm-SecureBootUEFI"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\SecureBoot\\State' -Name UEFISecureBootEnabled | Select-Object -ExpandProperty UEFISecureBootEnabled"},
 			},
 		}},
 	}
