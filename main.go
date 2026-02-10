@@ -45,10 +45,18 @@ func main() {
 		fmt.Println("9. Windows Product ID")
 		fmt.Println("10. MAC Addresses")
 		fmt.Println("11. TPM and Secure Boot Status")
-		fmt.Println("12. Print All to File (Detailed)")
-		fmt.Println("13. Print Clean HWID List")
-		fmt.Println("14. Compare with Previous Scan")
-		fmt.Println("15. Exit")
+		fmt.Println("12. OS Version and Build Info")
+		fmt.Println("13. Windows Updates and Patch Level")
+		fmt.Println("14. System Uptime and Boot Time")
+		fmt.Println("15. Current User and Auth Context")
+		fmt.Println("16. Firewall and Antivirus Status")
+		fmt.Println("17. Virtualization Detection")
+		fmt.Println("18. CPU Topology (Cores/Threads/Cache)")
+		fmt.Println("19. Memory Configuration (Speed/Voltage)")
+		fmt.Println("20. Print All to File (Detailed)")
+		fmt.Println("21. Print Clean HWID List")
+		fmt.Println("22. Compare with Previous Scan")
+		fmt.Println("23. Exit")
 		fmt.Println("========================================")
 
 		fmt.Print("Enter your choice: ")
@@ -217,16 +225,194 @@ func main() {
 			})
 			fmt.Println("[Complete] TPM and Secure Boot Check finished")
 		case "12":
-			saveAllToFile(false)
+			fmt.Println("\n[Starting] OS Version and Build Info Check...")
+			runCommandWithFallbacks("OS Version", Command{
+				primary: []string{"wmic", "os", "get", "Caption,Version,BuildNumber,OSArchitecture"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-WmiObject Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, OSArchitecture"},
+					{"powershell", "-Command", "Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, OSArchitecture"},
+				},
+			})
+			fmt.Println("\n[Checking] Detailed OS Info...")
+			runCommandWithFallbacks("OS Edition", Command{
+				primary: []string{"powershell", "-Command", "(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').ProductName"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsHardwareAbstractionLayer"},
+				},
+			})
+			fmt.Println("[Complete] OS Version and Build Info Check finished")
 		case "13":
-			saveAllToFile(true)
+			fmt.Println("\n[Starting] Windows Updates and Patch Level Check...")
+			runCommandWithFallbacks("Installed Updates", Command{
+				primary: []string{"wmic", "qfe", "list"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-HotFix | Select-Object Description, HotFixID, InstalledOn | Sort-Object InstalledOn -Descending"},
+					{"powershell", "-Command", "Get-WmiObject Win32_QuickFixEngineering | Select-Object Description, HotFixID, InstalledOn"},
+				},
+			})
+			fmt.Println("\n[Checking] Latest Update Info...")
+			runCommandWithFallbacks("Update Build Revision", Command{
+				primary: []string{"powershell", "-Command", "(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').UBR"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-ComputerInfo | Select-Object OsBuildNumber, OsVersion"},
+				},
+			})
+			fmt.Println("[Complete] Windows Updates and Patch Level Check finished")
 		case "14":
-			compareScans(reader)
+			fmt.Println("\n[Starting] System Uptime and Boot Time Check...")
+			runCommandWithFallbacks("Last Boot Time", Command{
+				primary: []string{"wmic", "os", "get", "lastbootuptime"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime"},
+					{"powershell", "-Command", "Get-WmiObject Win32_OperatingSystem | Select-Object LastBootUpTime"},
+				},
+			})
+			fmt.Println("\n[Checking] System Uptime...")
+			runCommandWithFallbacks("System Uptime", Command{
+				primary: []string{"powershell", "-Command", "(Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime | Select-Object Days, Hours, Minutes"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-Uptime"},
+					{"systeminfo", "|", "findstr", "/C:\"System Boot Time\""},
+				},
+			})
+			fmt.Println("[Complete] System Uptime and Boot Time Check finished")
 		case "15":
+			fmt.Println("\n[Starting] Current User and Auth Context Check...")
+			runCommandWithFallbacks("Current User", Command{
+				primary: []string{"whoami"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "$env:USERNAME"},
+					{"powershell", "-Command", "[System.Security.Principal.WindowsIdentity]::GetCurrent().Name"},
+				},
+			})
+			fmt.Println("\n[Checking] User Groups...")
+			runCommandWithFallbacks("User Groups", Command{
+				primary: []string{"whoami", "/groups"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "whoami /groups"},
+				},
+			})
+			fmt.Println("\n[Checking] Domain Info...")
+			runCommandWithFallbacks("Domain Membership", Command{
+				primary: []string{"wmic", "computersystem", "get", "domain,partofdomain"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-WmiObject Win32_ComputerSystem | Select-Object Domain, PartOfDomain"},
+					{"powershell", "-Command", "(Get-CimInstance Win32_ComputerSystem).Domain"},
+				},
+			})
+			fmt.Println("[Complete] Current User and Auth Context Check finished")
+		case "16":
+			fmt.Println("\n[Starting] Firewall and Antivirus Status Check...")
+			runCommandWithFallbacks("Firewall Status", Command{
+				primary: []string{"powershell", "-Command", "Get-NetFirewallProfile | Select-Object Name, Enabled"},
+				fallbacks: [][]string{
+					{"netsh", "advfirewall", "show", "allprofiles"},
+					{"powershell", "-Command", "Get-NetFirewallProfile -All"},
+				},
+			})
+			fmt.Println("\n[Checking] Antivirus Status...")
+			runCommandWithFallbacks("Antivirus Products", Command{
+				primary: []string{"powershell", "-Command", "Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-WmiObject -Namespace root\\SecurityCenter2 -Class AntiVirusProduct"},
+					{"wmic", "/namespace:\\\\root\\SecurityCenter2", "path", "AntiVirusProduct", "get", "displayName,productState"},
+				},
+			})
+			fmt.Println("\n[Checking] Windows Defender Status...")
+			runCommandWithFallbacks("Windows Defender", Command{
+				primary: []string{"powershell", "-Command", "Get-MpComputerStatus"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-Service WinDefend | Select-Object Status, StartType"},
+				},
+			})
+			fmt.Println("[Complete] Firewall and Antivirus Status Check finished")
+		case "17":
+			fmt.Println("\n[Starting] Virtualization Detection Check...")
+			runCommandWithFallbacks("System Manufacturer", Command{
+				primary: []string{"wmic", "computersystem", "get", "manufacturer,model"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-WmiObject Win32_ComputerSystem | Select-Object Manufacturer, Model"},
+					{"powershell", "-Command", "Get-CimInstance Win32_ComputerSystem | Select-Object Manufacturer, Model"},
+				},
+			})
+			fmt.Println("\n[Checking] BIOS Info for VM Detection...")
+			runCommandWithFallbacks("BIOS Version", Command{
+				primary: []string{"wmic", "bios", "get", "manufacturer,smbiosbiosversion"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-WmiObject Win32_BIOS | Select-Object Manufacturer, SMBIOSBIOSVersion"},
+					{"powershell", "-Command", "Get-CimInstance Win32_BIOS | Select-Object Manufacturer, SMBIOSBIOSVersion"},
+				},
+			})
+			fmt.Println("\n[Checking] Hypervisor Detection...")
+			runCommandWithFallbacks("Hypervisor Info", Command{
+				primary: []string{"powershell", "-Command", "(Get-WmiObject Win32_ComputerSystem).HypervisorPresent"},
+				fallbacks: [][]string{
+					{"systeminfo", "|", "findstr", "/C:\"Hyper-V\""},
+					{"powershell", "-Command", "Get-ComputerInfo | Select-Object HyperVisorPresent, HyperVRequirementVirtualizationFirmwareEnabled"},
+				},
+			})
+			fmt.Println("[Complete] Virtualization Detection Check finished")
+		case "18":
+			fmt.Println("\n[Starting] CPU Topology Check...")
+			runCommandWithFallbacks("CPU Details", Command{
+				primary: []string{"wmic", "cpu", "get", "Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-WmiObject Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed"},
+					{"powershell", "-Command", "Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed"},
+				},
+			})
+			fmt.Println("\n[Checking] CPU Cache Information...")
+			runCommandWithFallbacks("CPU Cache", Command{
+				primary: []string{"wmic", "cpu", "get", "L2CacheSize,L3CacheSize"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-WmiObject Win32_Processor | Select-Object L2CacheSize, L3CacheSize"},
+					{"powershell", "-Command", "Get-CimInstance Win32_Processor | Select-Object L2CacheSize, L3CacheSize"},
+				},
+			})
+			fmt.Println("\n[Checking] Detailed CPU Architecture...")
+			runCommandWithFallbacks("CPU Architecture", Command{
+				primary: []string{"powershell", "-Command", "Get-WmiObject Win32_Processor | Select-Object Architecture, DataWidth, AddressWidth, SocketDesignation"},
+				fallbacks: [][]string{
+					{"wmic", "cpu", "get", "Architecture,DataWidth,AddressWidth,SocketDesignation"},
+				},
+			})
+			fmt.Println("[Complete] CPU Topology Check finished")
+		case "19":
+			fmt.Println("\n[Starting] Memory Configuration Check...")
+			runCommandWithFallbacks("Memory Modules", Command{
+				primary: []string{"wmic", "memorychip", "get", "Capacity,Speed,Manufacturer,PartNumber"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-WmiObject Win32_PhysicalMemory | Select-Object Capacity, Speed, Manufacturer, PartNumber"},
+					{"powershell", "-Command", "Get-CimInstance Win32_PhysicalMemory | Select-Object Capacity, Speed, Manufacturer, PartNumber"},
+				},
+			})
+			fmt.Println("\n[Checking] Detailed Memory Info...")
+			runCommandWithFallbacks("Memory Details", Command{
+				primary: []string{"wmic", "memorychip", "get", "ConfiguredVoltage,ConfiguredClockSpeed,FormFactor,MemoryType"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-WmiObject Win32_PhysicalMemory | Select-Object ConfiguredVoltage, ConfiguredClockSpeed, FormFactor, MemoryType"},
+					{"powershell", "-Command", "Get-CimInstance Win32_PhysicalMemory | Select-Object ConfiguredVoltage, ConfiguredClockSpeed, FormFactor, MemoryType"},
+				},
+			})
+			fmt.Println("\n[Checking] Memory Timing and Location...")
+			runCommandWithFallbacks("Memory Slots", Command{
+				primary: []string{"wmic", "memorychip", "get", "DeviceLocator,BankLabel,DataWidth"},
+				fallbacks: [][]string{
+					{"powershell", "-Command", "Get-WmiObject Win32_PhysicalMemory | Select-Object DeviceLocator, BankLabel, DataWidth"},
+				},
+			})
+			fmt.Println("[Complete] Memory Configuration Check finished")
+		case "20":
+			saveAllToFile(false)
+		case "21":
+			saveAllToFile(true)
+		case "22":
+			compareScans(reader)
+		case "23":
 			fmt.Println("\nExiting HWID Checker...")
 			return
 		default:
-			fmt.Printf("Invalid choice '%s'. Please enter a number between 1-15.\n", choiceStr)
+			fmt.Printf("Invalid choice '%s'. Please enter a number between 1-23.\n", choiceStr)
 		}
 
 		fmt.Println("\nPress Enter to continue...")
@@ -1034,6 +1220,147 @@ func buildCommandList() []FileCommandEntry {
 			primary: []string{"powershell", "-Command", "Confirm-SecureBootUEFI"},
 			fallbacks: [][]string{
 				{"powershell", "-Command", "Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\SecureBoot\\State' -Name UEFISecureBootEnabled | Select-Object -ExpandProperty UEFISecureBootEnabled"},
+			},
+		}},
+		{"OS Version", Command{
+			primary: []string{"wmic", "os", "get", "Caption,Version,BuildNumber,OSArchitecture"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-WmiObject Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, OSArchitecture"},
+				{"powershell", "-Command", "Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, OSArchitecture"},
+			},
+		}},
+		{"OS Edition", Command{
+			primary: []string{"powershell", "-Command", "(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').ProductName"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsHardwareAbstractionLayer"},
+			},
+		}},
+		{"Installed Updates", Command{
+			primary: []string{"wmic", "qfe", "list"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-HotFix | Select-Object Description, HotFixID, InstalledOn | Sort-Object InstalledOn -Descending"},
+				{"powershell", "-Command", "Get-WmiObject Win32_QuickFixEngineering | Select-Object Description, HotFixID, InstalledOn"},
+			},
+		}},
+		{"Update Build Revision", Command{
+			primary: []string{"powershell", "-Command", "(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').UBR"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-ComputerInfo | Select-Object OsBuildNumber, OsVersion"},
+			},
+		}},
+		{"Last Boot Time", Command{
+			primary: []string{"wmic", "os", "get", "lastbootuptime"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime"},
+				{"powershell", "-Command", "Get-WmiObject Win32_OperatingSystem | Select-Object LastBootUpTime"},
+			},
+		}},
+		{"System Uptime", Command{
+			primary: []string{"powershell", "-Command", "(Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime | Select-Object Days, Hours, Minutes"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-Uptime"},
+				{"systeminfo", "|", "findstr", "/C:\"System Boot Time\""},
+			},
+		}},
+		{"Current User", Command{
+			primary: []string{"whoami"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "$env:USERNAME"},
+				{"powershell", "-Command", "[System.Security.Principal.WindowsIdentity]::GetCurrent().Name"},
+			},
+		}},
+		{"User Groups", Command{
+			primary: []string{"whoami", "/groups"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "whoami /groups"},
+			},
+		}},
+		{"Domain Membership", Command{
+			primary: []string{"wmic", "computersystem", "get", "domain,partofdomain"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-WmiObject Win32_ComputerSystem | Select-Object Domain, PartOfDomain"},
+				{"powershell", "-Command", "(Get-CimInstance Win32_ComputerSystem).Domain"},
+			},
+		}},
+		{"Firewall Status", Command{
+			primary: []string{"powershell", "-Command", "Get-NetFirewallProfile | Select-Object Name, Enabled"},
+			fallbacks: [][]string{
+				{"netsh", "advfirewall", "show", "allprofiles"},
+				{"powershell", "-Command", "Get-NetFirewallProfile -All"},
+			},
+		}},
+		{"Antivirus Products", Command{
+			primary: []string{"powershell", "-Command", "Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-WmiObject -Namespace root\\SecurityCenter2 -Class AntiVirusProduct"},
+				{"wmic", "/namespace:\\\\root\\SecurityCenter2", "path", "AntiVirusProduct", "get", "displayName,productState"},
+			},
+		}},
+		{"Windows Defender", Command{
+			primary: []string{"powershell", "-Command", "Get-MpComputerStatus"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-Service WinDefend | Select-Object Status, StartType"},
+			},
+		}},
+		{"System Manufacturer", Command{
+			primary: []string{"wmic", "computersystem", "get", "manufacturer,model"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-WmiObject Win32_ComputerSystem | Select-Object Manufacturer, Model"},
+				{"powershell", "-Command", "Get-CimInstance Win32_ComputerSystem | Select-Object Manufacturer, Model"},
+			},
+		}},
+		{"BIOS Version", Command{
+			primary: []string{"wmic", "bios", "get", "manufacturer,smbiosbiosversion"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-WmiObject Win32_BIOS | Select-Object Manufacturer, SMBIOSBIOSVersion"},
+				{"powershell", "-Command", "Get-CimInstance Win32_BIOS | Select-Object Manufacturer, SMBIOSBIOSVersion"},
+			},
+		}},
+		{"Hypervisor Info", Command{
+			primary: []string{"powershell", "-Command", "(Get-WmiObject Win32_ComputerSystem).HypervisorPresent"},
+			fallbacks: [][]string{
+				{"systeminfo", "|", "findstr", "/C:\"Hyper-V\""},
+				{"powershell", "-Command", "Get-ComputerInfo | Select-Object HyperVisorPresent, HyperVRequirementVirtualizationFirmwareEnabled"},
+			},
+		}},
+		{"CPU Details", Command{
+			primary: []string{"wmic", "cpu", "get", "Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-WmiObject Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed"},
+				{"powershell", "-Command", "Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed"},
+			},
+		}},
+		{"CPU Cache", Command{
+			primary: []string{"wmic", "cpu", "get", "L2CacheSize,L3CacheSize"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-WmiObject Win32_Processor | Select-Object L2CacheSize, L3CacheSize"},
+				{"powershell", "-Command", "Get-CimInstance Win32_Processor | Select-Object L2CacheSize, L3CacheSize"},
+			},
+		}},
+		{"CPU Architecture", Command{
+			primary: []string{"powershell", "-Command", "Get-WmiObject Win32_Processor | Select-Object Architecture, DataWidth, AddressWidth, SocketDesignation"},
+			fallbacks: [][]string{
+				{"wmic", "cpu", "get", "Architecture,DataWidth,AddressWidth,SocketDesignation"},
+			},
+		}},
+		{"Memory Modules", Command{
+			primary: []string{"wmic", "memorychip", "get", "Capacity,Speed,Manufacturer,PartNumber"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-WmiObject Win32_PhysicalMemory | Select-Object Capacity, Speed, Manufacturer, PartNumber"},
+				{"powershell", "-Command", "Get-CimInstance Win32_PhysicalMemory | Select-Object Capacity, Speed, Manufacturer, PartNumber"},
+			},
+		}},
+		{"Memory Details", Command{
+			primary: []string{"wmic", "memorychip", "get", "ConfiguredVoltage,ConfiguredClockSpeed,FormFactor,MemoryType"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-WmiObject Win32_PhysicalMemory | Select-Object ConfiguredVoltage, ConfiguredClockSpeed, FormFactor, MemoryType"},
+				{"powershell", "-Command", "Get-CimInstance Win32_PhysicalMemory | Select-Object ConfiguredVoltage, ConfiguredClockSpeed, FormFactor, MemoryType"},
+			},
+		}},
+		{"Memory Slots", Command{
+			primary: []string{"wmic", "memorychip", "get", "DeviceLocator,BankLabel,DataWidth"},
+			fallbacks: [][]string{
+				{"powershell", "-Command", "Get-WmiObject Win32_PhysicalMemory | Select-Object DeviceLocator, BankLabel, DataWidth"},
 			},
 		}},
 	}
