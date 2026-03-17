@@ -450,7 +450,10 @@ func saveAllToFile(cleanList bool) {
 
 	for idx, cmdEntry := range commands {
 		progress := fmt.Sprintf("[%d/%d]", idx+1, totalCommands)
-		percentComplete := float64(idx) / float64(totalCommands) * 100
+		percentComplete := 0.0
+		if totalCommands > 0 {
+			percentComplete = float64(idx+1) / float64(totalCommands) * 100
+		}
 
 		fmt.Printf("%s (%.1f%%) Processing: %s\n", progress, percentComplete, cmdEntry.description)
 
@@ -622,6 +625,11 @@ func compareScans(reader *bufio.Reader) {
 	file1Path := files[file1Idx-1]
 	file2Path := files[file2Idx-1]
 
+	if file1Path == file2Path {
+		fmt.Println("Please select two different files to compare.")
+		return
+	}
+
 	fmt.Printf("\nComparing:\n  File 1: %s\n  File 2: %s\n\n", file1Path, file2Path)
 
 	data1, err := parseHWIDFile(file1Path)
@@ -765,7 +773,7 @@ func parseHWIDFile(filename string) (map[string]string, error) {
 				currentKey = strings.TrimSpace(parts[1])
 				currentValue.Reset()
 			}
-		} else if strings.Contains(line, ":") && !strings.Contains(line, "Output:") && !strings.Contains(line, "Status:") {
+		} else if strings.Contains(line, ":") && !strings.Contains(line, "Output:") && !strings.Contains(line, "Status:") && !strings.Contains(line, "Command:") {
 			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
 				key := strings.TrimSpace(parts[0])
@@ -884,6 +892,11 @@ func writeFileSummary(file *os.File, total, success, failure int, elapsed time.D
 		return fmt.Errorf("file is nil")
 	}
 
+	successRate := 0.0
+	if total > 0 {
+		successRate = float64(success) / float64(total) * 100
+	}
+
 	summary := fmt.Sprintf(
 		"\n========================================\n"+
 			"           Report Summary\n"+
@@ -898,7 +911,7 @@ func writeFileSummary(file *os.File, total, success, failure int, elapsed time.D
 		total,
 		success,
 		failure,
-		float64(success)/float64(total)*100,
+		successRate,
 		elapsed.Round(time.Millisecond),
 		time.Now().Format("2006-01-02 15:04:05"),
 	)
@@ -908,13 +921,17 @@ func writeFileSummary(file *os.File, total, success, failure int, elapsed time.D
 }
 
 func displayScanSummary(total, success, failure int, elapsed time.Duration, filename string) {
+	successRate := 0.0
+	if total > 0 {
+		successRate = float64(success) / float64(total) * 100
+	}
 	fmt.Printf("\n========================================\n")
 	fmt.Printf("           Scan Complete\n")
 	fmt.Printf("========================================\n")
 	fmt.Printf("Total Commands: %d\n", total)
 	fmt.Printf("Successful: %d\n", success)
 	fmt.Printf("Failed: %d\n", failure)
-	fmt.Printf("Success Rate: %.1f%%\n", float64(success)/float64(total)*100)
+	fmt.Printf("Success Rate: %.1f%%\n", successRate)
 	fmt.Printf("Execution Time: %s\n", elapsed.Round(time.Millisecond))
 	fmt.Printf("Output saved to: %s\n", filename)
 	fmt.Printf("========================================\n")

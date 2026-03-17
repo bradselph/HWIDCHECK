@@ -15,17 +15,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: "1.26"
 
       - name: Build Binary
         run: go build -o HWIDCHECK.exe main.go
 
       - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.TOKEN_GITHUB }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./HWIDCHECK.exe
-          asset_name: HWIDCHECK.exe
-          asset_content_type: application/octet-stream
+        run: |
+          $uploadUrl = "${{ github.event.release.upload_url }}" -replace '\{.*', ''
+          curl.exe -sL -X POST -H "Authorization: token $env:GITHUB_TOKEN" -H "Content-Type: application/octet-stream" "${uploadUrl}?name=HWIDCHECK.exe" --data-binary "@HWIDCHECK.exe"
