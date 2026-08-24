@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -206,9 +207,9 @@ func main() {
 			})
 			fmt.Println("\n[Starting] Windows Product ID Check (Alternative)...")
 			runCommandWithFallbacks("Windows Product ID (Alternative)", Command{
-				primary: []string{"systeminfo", "|", "findstr", "/B", "/C:\"OS Serial Number\""},
+				primary: []string{"powershell", "-Command", "(Get-CimInstance -ClassName Win32_OperatingSystem).SerialNumber"},
 				fallbacks: [][]string{
-					{"powershell", "-Command", "systeminfo | Select-String 'OS Serial Number'"},
+					{"powershell", "-Command", "Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion' -Name ProductId | Select-Object -ExpandProperty ProductId"},
 				},
 			})
 			fmt.Println("[Complete] Windows Product ID Check finished")
@@ -237,9 +238,9 @@ func main() {
 			})
 			fmt.Println("\n[Starting] MAC Addresses Check (4/4)...")
 			runCommandWithFallbacks("MAC Addresses (IPConfig)", Command{
-				primary: []string{"ipconfig", "/all", "|", "findstr", `"Physical Address"`},
+				primary: []string{"powershell", "-Command", "Get-NetAdapter | Select-Object Name, MacAddress, Status"},
 				fallbacks: [][]string{
-					{"powershell", "-Command", "ipconfig /all | Select-String 'Physical Address'"},
+					{"powershell", "-Command", "Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration | Where-Object { $_.MACAddress -ne $null } | Select-Object Description, MACAddress"},
 				},
 			})
 			fmt.Println("[Complete] MAC Addresses Check finished")
@@ -400,7 +401,13 @@ func executePipedCommandWithResult(args []string) CommandResult {
 	}
 
 	fullCommand := strings.Join(args, " ")
-	cmd := exec.Command("cmd.exe", "/C", fullCommand)
+	cmd := exec.Command("cmd.exe")
+	// fullCommand can contain embedded double quotes (e.g. findstr /C:"OS Serial Number").
+	// exec.Command's default Windows argument escaping re-escapes those quotes for CRT-style
+	// parsing, but cmd.exe parses its command line differently, which splits the quoted
+	// phrase into separate tokens. Setting CmdLine directly bypasses that re-escaping and
+	// hands cmd.exe the literal command line it expects.
+	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: "cmd.exe /C " + fullCommand}
 	cmd.Env = os.Environ()
 
 	output, err := cmd.CombinedOutput()
@@ -1062,9 +1069,9 @@ func buildCommandList() []FileCommandEntry {
 			},
 		}},
 		{"Windows Product ID (Alternative)", Command{
-			primary: []string{"systeminfo", "|", "findstr", "/B", "/C:\"OS Serial Number\""},
+			primary: []string{"powershell", "-Command", "(Get-CimInstance -ClassName Win32_OperatingSystem).SerialNumber"},
 			fallbacks: [][]string{
-				{"powershell", "-Command", "systeminfo | Select-String 'OS Serial Number'"},
+				{"powershell", "-Command", "Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion' -Name ProductId | Select-Object -ExpandProperty ProductId"},
 			},
 		}},
 		{"MAC Addresses (GetMac)", Command{
@@ -1087,9 +1094,9 @@ func buildCommandList() []FileCommandEntry {
 			},
 		}},
 		{"MAC Addresses (IPConfig)", Command{
-			primary: []string{"ipconfig", "/all", "|", "findstr", `"Physical Address"`},
+			primary: []string{"powershell", "-Command", "Get-NetAdapter | Select-Object Name, MacAddress, Status"},
 			fallbacks: [][]string{
-				{"powershell", "-Command", "ipconfig /all | Select-String 'Physical Address'"},
+				{"powershell", "-Command", "Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration | Where-Object { $_.MACAddress -ne $null } | Select-Object Description, MACAddress"},
 			},
 		}},
 		{"TPM Status", Command{
