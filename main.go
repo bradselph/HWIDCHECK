@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -570,7 +571,7 @@ func processCommandForCleanList(cmdEntry FileCommandEntry) (bool, string) {
 	result := executeCommandWithResult(cmdEntry.command.primary)
 
 	if result.success {
-		return true, extractCleanValue(result.output)
+		return true, extractCleanValue(cmdEntry.description, result.output)
 	}
 
 	for _, fallback := range cmdEntry.command.fallbacks {
@@ -580,14 +581,109 @@ func processCommandForCleanList(cmdEntry FileCommandEntry) (bool, string) {
 
 		result = executeCommandWithResult(fallback)
 		if result.success {
-			return true, extractCleanValue(result.output)
+			return true, extractCleanValue(cmdEntry.description, result.output)
 		}
 	}
 
 	return false, ""
 }
 
-func extractCleanValue(output string) string {
+// extractCleanValue turns raw command output into a single readable line for
+// the clean HWID list. Table-shaped output (MAC adapters, volumes, TPM
+// properties) needs dedicated parsing — the old generic line filter just
+// stripped known header words and glued every remaining row together,
+// producing garbled multi-column dumps for anything wider than one value.
+func extractCleanValue(description, output string) string {
+	lower := strings.ToLower(description)
+	switch {
+	case strings.Contains(lower, "mac address"):
+		return extractMACAddresses(output)
+	case strings.Contains(lower, "tpm status"):
+		return extractTPMSummary(output)
+	case strings.Contains(lower, "volume information"):
+		return extractVolumeSummary(output)
+	default:
+		return extractGenericValue(output)
+	}
+}
+
+var macAddressPattern = regexp.MustCompile(`(?i)\b([0-9A-F]{2}[:-]){5}[0-9A-F]{2}\b`)
+
+func extractMACAddresses(output string) string {
+	matches := macAddressPattern.FindAllString(output, -1)
+
+	seen := make(map[string]bool)
+	var macs []string
+	for _, mac := range matches {
+		normalized := strings.ToUpper(strings.ReplaceAll(mac, "-", ":"))
+		if normalized == "00:00:00:00:00:00" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		macs = append(macs, normalized)
+	}
+
+	if len(macs) == 0 {
+		return "Not Available"
+	}
+
+	return strings.Join(macs, ", ")
+}
+
+var tpmPropertyPattern = regexp.MustCompile(`^(\w+)\s*:\s*(.+)$`)
+
+func extractTPMSummary(output string) string {
+	labels := map[string]string{
+		"IsActivated_InitialValue": "Activated",
+		"IsEnabled_InitialValue":   "Enabled",
+		"IsOwned_InitialValue":     "Owned",
+		"SpecVersion":              "SpecVersion",
+		"TpmPresent":               "Present",
+		"TpmReady":                 "Ready",
+	}
+
+	var parts []string
+	for _, line := range strings.Split(output, "\n") {
+		match := tpmPropertyPattern.FindStringSubmatch(strings.TrimSpace(line))
+		if match == nil {
+			continue
+		}
+		key := strings.TrimSpace(match[1])
+		label, ok := labels[key]
+		if !ok {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", label, strings.TrimSpace(match[2])))
+	}
+
+	if len(parts) == 0 {
+		return extractGenericValue(output)
+	}
+
+	return strings.Join(parts, ", ")
+}
+
+var volumeRowPattern = regexp.MustCompile(`^([A-Z])\s{2,}\S.*?(\d[\d.]*\s*(?:KB|MB|GB|TB))\s+(\d[\d.]*\s*(?:KB|MB|GB|TB))\s*$`)
+
+func extractVolumeSummary(output string) string {
+	var drives []string
+	for _, line := range strings.Split(output, "\n") {
+		match := volumeRowPattern.FindStringSubmatch(strings.TrimRight(line, " \t\r"))
+		if match == nil {
+			continue
+		}
+		letter, free, total := match[1], match[2], match[3]
+		drives = append(drives, fmt.Sprintf("%s: %s free of %s", letter, free, total))
+	}
+
+	if len(drives) == 0 {
+		return "Not Available"
+	}
+
+	return strings.Join(drives, ", ")
+}
+
+func extractGenericValue(output string) string {
 	lines := strings.Split(output, "\n")
 	var values []string
 
