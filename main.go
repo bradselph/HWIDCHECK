@@ -45,6 +45,23 @@ func isRunningAsAdmin() bool {
 // localized "requires administrator privileges" message to stdout and still
 // returns exit code 0). Without this check that output gets recorded as a
 // SUCCESS with garbage content instead of a clear FAILED result.
+var emptyTableSeparatorPattern = regexp.MustCompile(`^-+(\s+-+)*$`)
+
+// isEmptyTableOutput detects a PowerShell formatted table with a header row
+// and dashed separator but zero data rows — e.g. Get-TpmEndorsementKeyInfo
+// silently returns nothing (no error, exit 0) when not run elevated. That
+// text is non-empty, so without this check it slips past as a false SUCCESS.
+func isEmptyTableOutput(output string) bool {
+	var nonEmpty []string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			nonEmpty = append(nonEmpty, line)
+		}
+	}
+	return len(nonEmpty) == 2 && emptyTableSeparatorPattern.MatchString(nonEmpty[1])
+}
+
 func isPrivilegeError(output string) bool {
 	lower := strings.ToLower(output)
 	phrases := []string{
@@ -254,6 +271,11 @@ func main() {
 					{"powershell", "-Command", "Get-CimInstance -Namespace ROOT\\CIMV2\\Security\\MicrosoftTpm -ClassName Win32_Tpm"},
 				},
 			})
+			fmt.Println("\n[Checking] TPM Endorsement Key...")
+			runCommandWithFallbacks("TPM Endorsement Key", Command{
+				primary:   []string{"powershell", "-Command", "Get-TpmEndorsementKeyInfo | Select-Object PublicKeyHash, ManufacturerId, ManufacturerVersion"},
+				fallbacks: [][]string{},
+			})
 			fmt.Println("\n[Checking] Secure Boot Status...")
 			runCommandWithFallbacks("Secure Boot", Command{
 				primary: []string{"powershell", "-Command", "Confirm-SecureBootUEFI"},
@@ -387,6 +409,14 @@ func executeCommandWithResult(args []string) CommandResult {
 		}
 	}
 
+	if isEmptyTableOutput(outputStr) {
+		return CommandResult{
+			success: false,
+			error:   "Command returned no data (possibly requires administrator privileges)",
+			output:  outputStr,
+		}
+	}
+
 	return CommandResult{
 		success: true,
 		output:  outputStr,
@@ -437,6 +467,14 @@ func executePipedCommandWithResult(args []string) CommandResult {
 		return CommandResult{
 			success: false,
 			error:   "Administrator privileges required",
+			output:  outputStr,
+		}
+	}
+
+	if isEmptyTableOutput(outputStr) {
+		return CommandResult{
+			success: false,
+			error:   "Command returned no data (possibly requires administrator privileges)",
 			output:  outputStr,
 		}
 	}
@@ -598,7 +636,7 @@ func extractCleanValue(description, output string) string {
 	switch {
 	case strings.Contains(lower, "mac address"):
 		return extractMACAddresses(output)
-	case strings.Contains(lower, "tpm status"):
+	case strings.Contains(lower, "tpm status"), strings.Contains(lower, "tpm endorsement key"):
 		return extractTPMSummary(output)
 	case strings.Contains(lower, "volume information"):
 		return extractVolumeSummary(output)
@@ -634,12 +672,16 @@ var tpmPropertyPattern = regexp.MustCompile(`^(\w+)\s*:\s*(.+)$`)
 
 func extractTPMSummary(output string) string {
 	labels := map[string]string{
-		"IsActivated_InitialValue": "Activated",
-		"IsEnabled_InitialValue":   "Enabled",
-		"IsOwned_InitialValue":     "Owned",
-		"SpecVersion":              "SpecVersion",
-		"TpmPresent":               "Present",
-		"TpmReady":                 "Ready",
+		"IsActivated_InitialValue":    "Activated",
+		"IsEnabled_InitialValue":      "Enabled",
+		"IsOwned_InitialValue":        "Owned",
+		"SpecVersion":                 "SpecVersion",
+		"TpmPresent":                  "Present",
+		"TpmReady":                    "Ready",
+		"ManufacturerVersion":         "FirmwareVersion",
+		"PhysicalPresenceVersionInfo": "PPIVersion",
+		"PublicKeyHash":               "EKPublicKeyHash",
+		"ManufacturerId":              "ManufacturerId",
 	}
 
 	var parts []string
@@ -1201,6 +1243,10 @@ func buildCommandList() []FileCommandEntry {
 				{"powershell", "-Command", "Get-Tpm"},
 				{"powershell", "-Command", "Get-CimInstance -Namespace ROOT\\CIMV2\\Security\\MicrosoftTpm -ClassName Win32_Tpm"},
 			},
+		}},
+		{"TPM Endorsement Key", Command{
+			primary:   []string{"powershell", "-Command", "Get-TpmEndorsementKeyInfo | Select-Object PublicKeyHash, ManufacturerId, ManufacturerVersion"},
+			fallbacks: [][]string{},
 		}},
 		{"Secure Boot", Command{
 			primary: []string{"powershell", "-Command", "Confirm-SecureBootUEFI"},
