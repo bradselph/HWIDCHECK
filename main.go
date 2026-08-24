@@ -273,7 +273,7 @@ func main() {
 			})
 			fmt.Println("\n[Checking] TPM Endorsement Key...")
 			runCommandWithFallbacks("TPM Endorsement Key", Command{
-				primary:   []string{"powershell", "-Command", "Get-TpmEndorsementKeyInfo | Select-Object PublicKeyHash, ManufacturerId, ManufacturerVersion"},
+				primary:   []string{"powershell", "-Command", "Get-TpmEndorsementKeyInfo"},
 				fallbacks: [][]string{},
 			})
 			fmt.Println("\n[Checking] Secure Boot Status...")
@@ -1245,7 +1245,7 @@ func buildCommandList() []FileCommandEntry {
 			},
 		}},
 		{"TPM Endorsement Key", Command{
-			primary:   []string{"powershell", "-Command", "Get-TpmEndorsementKeyInfo | Select-Object PublicKeyHash, ManufacturerId, ManufacturerVersion"},
+			primary:   []string{"powershell", "-Command", "Get-TpmEndorsementKeyInfo"},
 			fallbacks: [][]string{},
 		}},
 		{"Secure Boot", Command{
