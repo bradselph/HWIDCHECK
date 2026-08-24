@@ -15,12 +15,18 @@ HWID Checker is a Go application that allows you to easily gather various hardwa
 - Display RAM serial number
 - Display Windows product ID
 - Display MAC addresses
+- Display TPM status and TPM Endorsement Key
+- Display Secure Boot status
 
 ### Advanced Features
 - **Timestamped File Output:** Save all information to uniquely timestamped text files (format: `hwid_info_YYYY-MM-DD_HH-MM-SS.txt`) to prevent overwriting previous scans
+- **Clean HWID List:** Generate a compact, human-readable summary (`hwid_clean_YYYY-MM-DD_HH-MM-SS.txt`) with one line per identifier instead of raw command output
+- **Scan Comparison:** Compare two previous scan files to see what changed between runs
+- **Administrator Detection:** Reports whether the process is elevated, both on-screen and in the file header, since TPM/Secure Boot/Endorsement Key checks require Administrator privileges to return real data
 - **Real-time Progress Tracking:** Visual progress indicators showing completion percentage and status during full system scans
-- **Comprehensive Error Handling:** Robust error handling with detailed logging and graceful recovery from failures
+- **Comprehensive Error Handling:** Robust error handling with detailed logging and graceful recovery from failures, including detection of commands that report a privilege error or return an empty result while still exiting successfully
 - **Multiple Fallback Commands:** Automatic command fallback when primary commands fail, ensuring maximum compatibility
+- **Locale-Independent:** Checks use CIM/PowerShell property access instead of parsing localized command-line text, so results are consistent regardless of the system's display language
 - **PowerShell Integration:** Support for both WMI (legacy) and CIM (modern) PowerShell cmdlets
 - **Detailed Status Reporting:** Success/failure tracking with execution time and success rate statistics
 - **Enhanced User Experience:** Clear visual feedback with [Starting], [Complete], [Success], and [Failed] status tags
@@ -34,7 +40,7 @@ You can download the pre-compiled executable for Windows from the [Releases](htt
 
 - Windows operating system
 - PowerShell (any version, improved functionality with PowerShell 3.0+)
-- Administrator privileges recommended for complete hardware information access
+- Administrator privileges required for complete results — TPM Status, TPM Endorsement Key, and Secure Boot all fail or return incomplete data without elevation. The application warns on startup and records `Administrator: Yes/No` in every report if not run elevated.
 
 **Note on OS Support:** While HWID Checker is primarily developed and optimized for Windows, the Go programming language allows for cross-platform compilation. However, this tool relies heavily on Windows-specific commands (WMIC, PowerShell, cmd.exe) and will not function correctly on other operating systems without significant modifications. If you're interested in using HWID Checker on another operating system, you would need to modify the source code to use platform-appropriate system commands.
 
@@ -88,8 +94,11 @@ Select an option:
 8. RAM (Serial Number)
 9. Windows Product ID
 10. MAC Addresses
-11. Print All to File and Save
-12. Exit
+11. TPM and Secure Boot Status
+12. Print All to File (Detailed)
+13. Print Clean HWID List
+14. Compare with Previous Scan
+15. Exit
 ========================================
 ```
 
@@ -112,51 +121,72 @@ XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
 Press Enter to continue...
 ```
 
-#### Save All Information to File
+#### Save All Information to File (Detailed)
 ```
-Enter your choice: 11
+Enter your choice: 12
 
 ========================================
 Starting full system scan...
-Output file: hwid_info_2024-10-14_15-30-45.txt
+Output file: hwid_info_2026-08-23_21-08-45.txt
 ========================================
 
-[1/14] (0.0%) Processing: SMBIOS (UUID)
-[1/14] SUCCESS - SMBIOS (UUID)
-[2/14] (7.1%) Processing: BIOS (Serial Number)
-[2/14] SUCCESS - BIOS (Serial Number)
-[3/14] (14.3%) Processing: Motherboard (Serial Number)
-[3/14] SUCCESS - Motherboard (Serial Number)
+[1/17] (0.0%) Processing: SMBIOS (UUID)
+[1/17] SUCCESS - SMBIOS (UUID)
+[2/17] (5.9%) Processing: BIOS (Serial Number)
+[2/17] SUCCESS - BIOS (Serial Number)
+[3/17] (11.8%) Processing: Motherboard (Serial Number)
+[3/17] SUCCESS - Motherboard (Serial Number)
 ...
-[14/14] (92.9%) Processing: MAC Addresses (IPConfig)
-[14/14] SUCCESS - MAC Addresses (IPConfig)
+[17/17] (94.1%) Processing: Secure Boot
+[17/17] SUCCESS - Secure Boot
 
 ========================================
            Scan Complete
 ========================================
-Total Commands: 14
-Successful: 14
+Total Commands: 17
+Successful: 17
 Failed: 0
 Success Rate: 100.0%
-Execution Time: 5.234s
-Output saved to: hwid_info_2024-10-14_15-30-45.txt
+Execution Time: 6.419s
+Output saved to: hwid_info_2026-08-23_21-08-45.txt
 ========================================
 
 Press Enter to continue...
 ```
 
+#### Print Clean HWID List
+```
+Enter your choice: 13
+
+========================================
+Generating clean HWID list...
+Output file: hwid_clean_2026-08-23_21-00-53.txt
+========================================
+...
+```
+Produces a compact summary file, one line per identifier:
+```
+SMBIOS (UUID): XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+Motherboard (Serial Number): XXXXXXXXXXXXXXXX
+Volume Information: C: 470.88 GB free of 952.98 GB, G: 14.83 GB free of 953.85 GB, E: 205.34 GB free of 447.11 GB
+MAC Addresses (GetMac): XX:XX:XX:XX:XX:XX, XX:XX:XX:XX:XX:XX, ...
+TPM Status: Activated=True, Enabled=True, Owned=True, SpecVersion=2.0, 0, 1.38
+Secure Boot: True
+```
+
 ### Output File Format
 
-When you select option 11, a timestamped file is created with the following structure:
+When you select option 12, a timestamped file is created with the following structure:
 ```
 ========================================
   Hardware ID Information Report
 ========================================
-Generated: 2024-10-14 15:30:45
+Generated: 2026-08-23 21:08:45
 System: Windows
+Administrator: Yes
 ========================================
 
-[1/14] SMBIOS (UUID)
+[1/17] SMBIOS (UUID)
 ========================================
 Primary Command: wmic csproduct get uuid
 Status: SUCCESS
@@ -169,12 +199,12 @@ XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
 ========================================
            Report Summary
 ========================================
-Total Commands Executed: 14
-Successful: 14
+Total Commands Executed: 17
+Successful: 17
 Failed: 0
 Success Rate: 100.0%
-Execution Time: 5.234s
-Completion Time: 2024-10-14 15:30:50
+Execution Time: 6.419s
+Completion Time: 2026-08-23 21:08:52
 ========================================
 ```
 
@@ -229,11 +259,24 @@ Real-time progress indication includes:
 - Check available disk space
 - Verify antivirus isn't blocking file creation
 
+### TPM Status, TPM Endorsement Key, or Secure Boot report FAILED
+- These checks require Administrator privileges; the report header's `Administrator:` line confirms whether the process was elevated
+- Even when elevated, some hardware/firmware combinations don't expose a TPM Endorsement Key — the report will show the actual PowerShell error message rather than a blank result
+
 ## License
 
 This project is licensed under the AGPL-3.0 License. See the [LICENSE](LICENSE) file for more details.
 
 ## Changelog
+- Added TPM Endorsement Key check as a real per-chip TPM identifier
+- Added Administrator-privilege detection, with a startup warning and an `Administrator:` field in every report
+- Fixed commands (e.g. `Get-Tpm`, `Confirm-SecureBootUEFI`, `Get-TpmEndorsementKeyInfo`) being logged as SUCCESS when they actually printed a privilege error or returned an empty result
+- Fixed a Windows command-line quoting bug that broke `findstr`-based piped commands
+- Replaced locale-dependent `findstr` label parsing (English-only `systeminfo`/`ipconfig` labels) with locale-independent CIM/PowerShell equivalents
+- Fixed the Clean HWID List producing garbled, unreadable output for MAC address, volume, and TPM checks
+- Added TPM and Secure Boot status checks
+- Implemented Clean HWID List generation (option 13)
+- Added scan comparison functionality (option 14)
 - Added timestamped file output to prevent overwriting previous scans
 - Implemented real-time progress tracking with percentage indicators
 - Improved visual feedback with status tags
