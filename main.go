@@ -26,8 +26,52 @@ type HWIDData struct {
 	value string
 }
 
+// isRunningAsAdmin reports whether the process has administrator privileges.
+// Opening a physical drive handle requires elevation on Windows, so a
+// successful open is a reliable signal without extra dependencies.
+func isRunningAsAdmin() bool {
+	f, err := os.Open(`\\.\PHYSICALDRIVE0`)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
+}
+
+// isPrivilegeError detects command output that reports missing admin rights
+// even though the process itself exited successfully (e.g. Get-Tpm prints a
+// localized "requires administrator privileges" message to stdout and still
+// returns exit code 0). Without this check that output gets recorded as a
+// SUCCESS with garbage content instead of a clear FAILED result.
+func isPrivilegeError(output string) bool {
+	lower := strings.ToLower(output)
+	phrases := []string{
+		"se requiere privilegios de administrador",
+		"acceso denegado",
+		"privilegios adecuados",
+		"access is denied",
+		"access denied",
+		"administrator privileges are required",
+		"run as administrator",
+		"requires elevation",
+		"you must run this cmdlet from an elevated",
+	}
+	for _, phrase := range phrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
 	reader := bufio.NewReader(os.Stdin)
+
+	if !isRunningAsAdmin() {
+		fmt.Println("\n[Warning] Not running as Administrator — TPM, Secure Boot, and some")
+		fmt.Println("          other checks will fail or return incomplete data.")
+		fmt.Println("          Re-launch this program as Administrator for full results.")
+	}
 
 	for {
 		fmt.Println("\n========================================")
@@ -333,6 +377,14 @@ func executeCommandWithResult(args []string) CommandResult {
 		}
 	}
 
+	if isPrivilegeError(outputStr) {
+		return CommandResult{
+			success: false,
+			error:   "Administrator privileges required",
+			output:  outputStr,
+		}
+	}
+
 	return CommandResult{
 		success: true,
 		output:  outputStr,
@@ -370,6 +422,14 @@ func executePipedCommandWithResult(args []string) CommandResult {
 		return CommandResult{
 			success: false,
 			error:   "Piped command returned empty output",
+		}
+	}
+
+	if isPrivilegeError(outputStr) {
+		return CommandResult{
+			success: false,
+			error:   "Administrator privileges required",
+			output:  outputStr,
 		}
 	}
 
@@ -852,6 +912,11 @@ func writeFileHeader(file *os.File, cleanList bool) error {
 		return fmt.Errorf("file is nil")
 	}
 
+	adminStatus := "No (run as Administrator for TPM/Secure Boot/full results)"
+	if isRunningAsAdmin() {
+		adminStatus = "Yes"
+	}
+
 	var header string
 	if cleanList {
 		header = fmt.Sprintf(
@@ -860,8 +925,10 @@ func writeFileHeader(file *os.File, cleanList bool) error {
 				"========================================\n"+
 				"Generated: %s\n"+
 				"System: Windows\n"+
+				"Administrator: %s\n"+
 				"========================================\n\n",
 			time.Now().Format("2006-01-02 15:04:05"),
+			adminStatus,
 		)
 	} else {
 		header = fmt.Sprintf(
@@ -870,8 +937,10 @@ func writeFileHeader(file *os.File, cleanList bool) error {
 				"========================================\n"+
 				"Generated: %s\n"+
 				"System: Windows\n"+
+				"Administrator: %s\n"+
 				"========================================\n\n",
 			time.Now().Format("2006-01-02 15:04:05"),
+			adminStatus,
 		)
 	}
 
