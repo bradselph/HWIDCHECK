@@ -212,6 +212,23 @@ var nativeChecks = map[string]func() (string, error){
 	nativeTulachEKMarker: tulachEKHash,
 }
 
+const tpmEKMethodExplanation = `[Note] Why "TPM Endorsement Key" and "TPM Endorsement Key (Tulach Method)" print different values:
+  Both read the exact same physical Endorsement Key burned into the TPM chip -
+  the strings differ because each method hashes a different byte encoding of
+  that key, not because the underlying key data is different.
+
+  - "TPM Endorsement Key" calls PowerShell's Get-TpmEndorsementKeyInfo, which
+    returns Microsoft's own internally-computed PublicKeyHash property. This
+    requires Administrator privileges.
+  - "TPM Endorsement Key (Tulach Method)" reads the raw EK public key
+    directly from the CNG Platform Crypto Provider (ncrypt.dll) via
+    NCryptOpenStorageProvider/NCryptGetProperty("PCP_EKPUB") - the same
+    low-level API Samuel Tulach's tpm-info.exe uses - then DER-encodes it as
+    a PKCS#1 RSAPublicKey and hashes that with MD5/SHA1/SHA256. This does
+    not require elevation, and its output has been verified to match the
+    real tpm-info.exe tool byte-for-byte.
+`
+
 func main() {
 	reader := bufio.NewReader(os.Stdin)
 
@@ -410,6 +427,7 @@ func main() {
 				primary:   []string{nativeTulachEKMarker},
 				fallbacks: [][]string{},
 			})
+			fmt.Println(tpmEKMethodExplanation)
 			fmt.Println("\n[Checking] Secure Boot Status...")
 			runCommandWithFallbacks("Secure Boot", Command{
 				primary: []string{"powershell", "-Command", "Confirm-SecureBootUEFI"},
@@ -715,6 +733,11 @@ func saveAllToFile(cleanList bool) {
 			}
 		} else {
 			success = processCommandForFile(file, cmdEntry, progress)
+			if cmdEntry.description == "TPM Endorsement Key (Tulach Method)" {
+				if _, err := fmt.Fprintln(file, tpmEKMethodExplanation); err != nil {
+					logError(fmt.Sprintf("[Warning] Failed to write TPM EK explanation: %s", err))
+				}
+			}
 		}
 
 		if success {
