@@ -2,7 +2,13 @@ package main
 
 import (
 	"bufio"
+	"crypto/md5"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/asn1"
+	"encoding/binary"
 	"fmt"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 type Command struct {
@@ -81,6 +88,128 @@ func isPrivilegeError(output string) bool {
 		}
 	}
 	return false
+}
+
+// The following replicates how Samuel Tulach's tpm-info.exe reads the TPM
+// Endorsement Key: it bypasses PowerShell/WMI entirely and calls the CNG
+// Platform Crypto Provider directly (NCryptOpenStorageProvider on "Microsoft
+// Platform Crypto Provider", then NCryptGetProperty for "PCP_EKPUB", which
+// returns a raw BCRYPT_RSAPUBLIC_BLOB). That's why Get-TpmEndorsementKeyInfo's
+// PublicKeyHash never matches its output — PowerShell hashes its own internal
+// byte layout, while tpm-info.exe DER-encodes the raw key as a PKCS#1
+// RSAPublicKey and hashes that instead, then prints MD5/SHA1/SHA256 of it.
+var (
+	ncryptDLL                     = syscall.NewLazyDLL("ncrypt.dll")
+	procNCryptOpenStorageProvider = ncryptDLL.NewProc("NCryptOpenStorageProvider")
+	procNCryptGetProperty         = ncryptDLL.NewProc("NCryptGetProperty")
+	procNCryptFreeObject          = ncryptDLL.NewProc("NCryptFreeObject")
+)
+
+const bcryptRSAPublicMagic = 0x31415352 // "RSA1" little-endian, per bcrypt.h
+
+func utf16Ptr(s string) *uint16 {
+	p, err := syscall.UTF16PtrFromString(s)
+	if err != nil {
+		return nil
+	}
+	return p
+}
+
+// tulachEKHash pulls the raw TPM Endorsement Key public key via the CNG
+// Platform Crypto Provider (the same low-level API tpm-info.exe uses),
+// DER-encodes it as a PKCS#1 RSAPublicKey, and returns its MD5/SHA1/SHA256
+// hashes in the same labeled format tpm-info.exe prints.
+func tulachEKHash() (string, error) {
+	providerName := utf16Ptr("Microsoft Platform Crypto Provider")
+	if providerName == nil {
+		return "", fmt.Errorf("failed to encode provider name")
+	}
+
+	var hProvider uintptr
+	ret, _, _ := procNCryptOpenStorageProvider.Call(
+		uintptr(unsafe.Pointer(&hProvider)),
+		uintptr(unsafe.Pointer(providerName)),
+		0,
+	)
+	if ret != 0 {
+		return "", fmt.Errorf("NCryptOpenStorageProvider failed: 0x%08X", uint32(ret))
+	}
+	defer procNCryptFreeObject.Call(hProvider)
+
+	propName := utf16Ptr("PCP_EKPUB")
+	if propName == nil {
+		return "", fmt.Errorf("failed to encode property name")
+	}
+
+	var cbResult uint32
+	ret, _, _ = procNCryptGetProperty.Call(
+		hProvider,
+		uintptr(unsafe.Pointer(propName)),
+		0,
+		0,
+		uintptr(unsafe.Pointer(&cbResult)),
+		0,
+	)
+	if ret != 0 || cbResult == 0 {
+		return "", fmt.Errorf("NCryptGetProperty (size query) failed: 0x%08X", uint32(ret))
+	}
+
+	buf := make([]byte, cbResult)
+	ret, _, _ = procNCryptGetProperty.Call(
+		hProvider,
+		uintptr(unsafe.Pointer(propName)),
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(cbResult),
+		uintptr(unsafe.Pointer(&cbResult)),
+		0,
+	)
+	if ret != 0 {
+		return "", fmt.Errorf("NCryptGetProperty failed: 0x%08X", uint32(ret))
+	}
+	buf = buf[:cbResult]
+
+	// BCRYPT_RSAKEY_BLOB header: Magic, BitLength, cbPublicExp, cbModulus,
+	// cbPrime1, cbPrime2 (6 x uint32), followed by PublicExponent then Modulus.
+	if len(buf) < 24 {
+		return "", fmt.Errorf("EK public key blob too short (%d bytes)", len(buf))
+	}
+
+	magic := binary.LittleEndian.Uint32(buf[0:4])
+	if magic != bcryptRSAPublicMagic {
+		return "", fmt.Errorf("unsupported EK key type (magic 0x%08X, expected RSA)", magic)
+	}
+
+	cbPublicExp := int(binary.LittleEndian.Uint32(buf[8:12]))
+	cbModulus := int(binary.LittleEndian.Uint32(buf[12:16]))
+
+	offset := 24
+	if offset+cbPublicExp+cbModulus > len(buf) {
+		return "", fmt.Errorf("EK public key blob truncated")
+	}
+
+	exponent := new(big.Int).SetBytes(buf[offset : offset+cbPublicExp])
+	offset += cbPublicExp
+	modulus := new(big.Int).SetBytes(buf[offset : offset+cbModulus])
+
+	der, err := asn1.Marshal(struct {
+		Modulus  *big.Int
+		Exponent *big.Int
+	}{modulus, exponent})
+	if err != nil {
+		return "", fmt.Errorf("DER encoding failed: %v", err)
+	}
+
+	md5Sum := md5.Sum(der)
+	sha1Sum := sha1.Sum(der)
+	sha256Sum := sha256.Sum256(der)
+
+	return fmt.Sprintf("MD5:    %x\nSHA1:   %x\nSHA256: %x", md5Sum, sha1Sum, sha256Sum), nil
+}
+
+const nativeTulachEKMarker = "__native_tulach_ek__"
+
+var nativeChecks = map[string]func() (string, error){
+	nativeTulachEKMarker: tulachEKHash,
 }
 
 func main() {
@@ -276,6 +405,11 @@ func main() {
 				primary:   []string{"powershell", "-Command", "Get-TpmEndorsementKeyInfo"},
 				fallbacks: [][]string{},
 			})
+			fmt.Println("\n[Checking] TPM Endorsement Key (Tulach Method)...")
+			runCommandWithFallbacks("TPM Endorsement Key (Tulach Method)", Command{
+				primary:   []string{nativeTulachEKMarker},
+				fallbacks: [][]string{},
+			})
 			fmt.Println("\n[Checking] Secure Boot Status...")
 			runCommandWithFallbacks("Secure Boot", Command{
 				primary: []string{"powershell", "-Command", "Confirm-SecureBootUEFI"},
@@ -363,6 +497,14 @@ func executeCommandWithResult(args []string) CommandResult {
 	}
 
 	fmt.Printf("Command: %s\n", strings.Join(args, " "))
+
+	if fn, ok := nativeChecks[args[0]]; ok {
+		output, err := fn()
+		if err != nil {
+			return CommandResult{success: false, error: err.Error()}
+		}
+		return CommandResult{success: true, output: output}
+	}
 
 	if containsPipe(args) {
 		return executePipedCommandWithResult(args)
@@ -1246,6 +1388,10 @@ func buildCommandList() []FileCommandEntry {
 		}},
 		{"TPM Endorsement Key", Command{
 			primary:   []string{"powershell", "-Command", "Get-TpmEndorsementKeyInfo"},
+			fallbacks: [][]string{},
+		}},
+		{"TPM Endorsement Key (Tulach Method)", Command{
+			primary:   []string{nativeTulachEKMarker},
 			fallbacks: [][]string{},
 		}},
 		{"Secure Boot", Command{
