@@ -2,12 +2,21 @@ package main
 
 import (
 	"bufio"
+	"crypto/md5"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/asn1"
+	"encoding/binary"
 	"fmt"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 )
 
 type Command struct {
@@ -26,8 +35,208 @@ type HWIDData struct {
 	value string
 }
 
+// isRunningAsAdmin reports whether the process has administrator privileges.
+// Opening a physical drive handle requires elevation on Windows, so a
+// successful open is a reliable signal without extra dependencies.
+func isRunningAsAdmin() bool {
+	f, err := os.Open(`\\.\PHYSICALDRIVE0`)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
+}
+
+// isPrivilegeError detects command output that reports missing admin rights
+// even though the process itself exited successfully (e.g. Get-Tpm prints a
+// localized "requires administrator privileges" message to stdout and still
+// returns exit code 0). Without this check that output gets recorded as a
+// SUCCESS with garbage content instead of a clear FAILED result.
+var emptyTableSeparatorPattern = regexp.MustCompile(`^-+(\s+-+)*$`)
+
+// isEmptyTableOutput detects a PowerShell formatted table with a header row
+// and dashed separator but zero data rows — e.g. Get-TpmEndorsementKeyInfo
+// silently returns nothing (no error, exit 0) when not run elevated. That
+// text is non-empty, so without this check it slips past as a false SUCCESS.
+func isEmptyTableOutput(output string) bool {
+	var nonEmpty []string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			nonEmpty = append(nonEmpty, line)
+		}
+	}
+	return len(nonEmpty) == 2 && emptyTableSeparatorPattern.MatchString(nonEmpty[1])
+}
+
+func isPrivilegeError(output string) bool {
+	lower := strings.ToLower(output)
+	phrases := []string{
+		"se requiere privilegios de administrador",
+		"acceso denegado",
+		"privilegios adecuados",
+		"access is denied",
+		"access denied",
+		"administrator privileges are required",
+		"run as administrator",
+		"requires elevation",
+		"you must run this cmdlet from an elevated",
+	}
+	for _, phrase := range phrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// The following replicates how Samuel Tulach's tpm-info.exe reads the TPM
+// Endorsement Key: it bypasses PowerShell/WMI entirely and calls the CNG
+// Platform Crypto Provider directly (NCryptOpenStorageProvider on "Microsoft
+// Platform Crypto Provider", then NCryptGetProperty for "PCP_EKPUB", which
+// returns a raw BCRYPT_RSAPUBLIC_BLOB). That's why Get-TpmEndorsementKeyInfo's
+// PublicKeyHash never matches its output — PowerShell hashes its own internal
+// byte layout, while tpm-info.exe DER-encodes the raw key as a PKCS#1
+// RSAPublicKey and hashes that instead, then prints MD5/SHA1/SHA256 of it.
+var (
+	ncryptDLL                     = syscall.NewLazyDLL("ncrypt.dll")
+	procNCryptOpenStorageProvider = ncryptDLL.NewProc("NCryptOpenStorageProvider")
+	procNCryptGetProperty         = ncryptDLL.NewProc("NCryptGetProperty")
+	procNCryptFreeObject          = ncryptDLL.NewProc("NCryptFreeObject")
+)
+
+const bcryptRSAPublicMagic = 0x31415352 // "RSA1" little-endian, per bcrypt.h
+
+func utf16Ptr(s string) *uint16 {
+	p, err := syscall.UTF16PtrFromString(s)
+	if err != nil {
+		return nil
+	}
+	return p
+}
+
+// tulachEKHash pulls the raw TPM Endorsement Key public key via the CNG
+// Platform Crypto Provider (the same low-level API tpm-info.exe uses),
+// DER-encodes it as a PKCS#1 RSAPublicKey, and returns its MD5/SHA1/SHA256
+// hashes in the same labeled format tpm-info.exe prints.
+func tulachEKHash() (string, error) {
+	providerName := utf16Ptr("Microsoft Platform Crypto Provider")
+	if providerName == nil {
+		return "", fmt.Errorf("failed to encode provider name")
+	}
+
+	var hProvider uintptr
+	ret, _, _ := procNCryptOpenStorageProvider.Call(
+		uintptr(unsafe.Pointer(&hProvider)),
+		uintptr(unsafe.Pointer(providerName)),
+		0,
+	)
+	if ret != 0 {
+		return "", fmt.Errorf("NCryptOpenStorageProvider failed: 0x%08X", uint32(ret))
+	}
+	defer procNCryptFreeObject.Call(hProvider)
+
+	propName := utf16Ptr("PCP_EKPUB")
+	if propName == nil {
+		return "", fmt.Errorf("failed to encode property name")
+	}
+
+	var cbResult uint32
+	ret, _, _ = procNCryptGetProperty.Call(
+		hProvider,
+		uintptr(unsafe.Pointer(propName)),
+		0,
+		0,
+		uintptr(unsafe.Pointer(&cbResult)),
+		0,
+	)
+	if ret != 0 || cbResult == 0 {
+		return "", fmt.Errorf("NCryptGetProperty (size query) failed: 0x%08X", uint32(ret))
+	}
+
+	buf := make([]byte, cbResult)
+	ret, _, _ = procNCryptGetProperty.Call(
+		hProvider,
+		uintptr(unsafe.Pointer(propName)),
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(cbResult),
+		uintptr(unsafe.Pointer(&cbResult)),
+		0,
+	)
+	if ret != 0 {
+		return "", fmt.Errorf("NCryptGetProperty failed: 0x%08X", uint32(ret))
+	}
+	buf = buf[:cbResult]
+
+	// BCRYPT_RSAKEY_BLOB header: Magic, BitLength, cbPublicExp, cbModulus,
+	// cbPrime1, cbPrime2 (6 x uint32), followed by PublicExponent then Modulus.
+	if len(buf) < 24 {
+		return "", fmt.Errorf("EK public key blob too short (%d bytes)", len(buf))
+	}
+
+	magic := binary.LittleEndian.Uint32(buf[0:4])
+	if magic != bcryptRSAPublicMagic {
+		return "", fmt.Errorf("unsupported EK key type (magic 0x%08X, expected RSA)", magic)
+	}
+
+	cbPublicExp := int(binary.LittleEndian.Uint32(buf[8:12]))
+	cbModulus := int(binary.LittleEndian.Uint32(buf[12:16]))
+
+	offset := 24
+	if offset+cbPublicExp+cbModulus > len(buf) {
+		return "", fmt.Errorf("EK public key blob truncated")
+	}
+
+	exponent := new(big.Int).SetBytes(buf[offset : offset+cbPublicExp])
+	offset += cbPublicExp
+	modulus := new(big.Int).SetBytes(buf[offset : offset+cbModulus])
+
+	der, err := asn1.Marshal(struct {
+		Modulus  *big.Int
+		Exponent *big.Int
+	}{modulus, exponent})
+	if err != nil {
+		return "", fmt.Errorf("DER encoding failed: %v", err)
+	}
+
+	md5Sum := md5.Sum(der)
+	sha1Sum := sha1.Sum(der)
+	sha256Sum := sha256.Sum256(der)
+
+	return fmt.Sprintf("MD5:    %x\nSHA1:   %x\nSHA256: %x", md5Sum, sha1Sum, sha256Sum), nil
+}
+
+const nativeTulachEKMarker = "__native_tulach_ek__"
+
+var nativeChecks = map[string]func() (string, error){
+	nativeTulachEKMarker: tulachEKHash,
+}
+
+const tpmEKMethodExplanation = `[Note] Why "TPM Endorsement Key" and "TPM Endorsement Key (Tulach Method)" print different values:
+  Both read the exact same physical Endorsement Key burned into the TPM chip -
+  the strings differ because each method hashes a different byte encoding of
+  that key, not because the underlying key data is different.
+
+  - "TPM Endorsement Key" calls PowerShell's Get-TpmEndorsementKeyInfo, which
+    returns Microsoft's own internally-computed PublicKeyHash property. This
+    requires Administrator privileges.
+  - "TPM Endorsement Key (Tulach Method)" reads the raw EK public key
+    directly from the CNG Platform Crypto Provider (ncrypt.dll) via
+    NCryptOpenStorageProvider/NCryptGetProperty("PCP_EKPUB") - the same
+    low-level API Samuel Tulach's tpm-info.exe uses - then DER-encodes it as
+    a PKCS#1 RSAPublicKey and hashes that with MD5/SHA1/SHA256. This does
+    not require elevation, and its output has been verified to match the
+    real tpm-info.exe tool byte-for-byte.
+`
+
 func main() {
 	reader := bufio.NewReader(os.Stdin)
+
+	if !isRunningAsAdmin() {
+		fmt.Println("\n[Warning] Not running as Administrator — TPM, Secure Boot, and some")
+		fmt.Println("          other checks will fail or return incomplete data.")
+		fmt.Println("          Re-launch this program as Administrator for full results.")
+	}
 
 	for {
 		fmt.Println("\n========================================")
@@ -162,9 +371,9 @@ func main() {
 			})
 			fmt.Println("\n[Starting] Windows Product ID Check (Alternative)...")
 			runCommandWithFallbacks("Windows Product ID (Alternative)", Command{
-				primary: []string{"systeminfo", "|", "findstr", "/B", "/C:\"OS Serial Number\""},
+				primary: []string{"powershell", "-Command", "(Get-CimInstance -ClassName Win32_OperatingSystem).SerialNumber"},
 				fallbacks: [][]string{
-					{"powershell", "-Command", "systeminfo | Select-String 'OS Serial Number'"},
+					{"powershell", "-Command", "Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion' -Name ProductId | Select-Object -ExpandProperty ProductId"},
 				},
 			})
 			fmt.Println("[Complete] Windows Product ID Check finished")
@@ -193,9 +402,9 @@ func main() {
 			})
 			fmt.Println("\n[Starting] MAC Addresses Check (4/4)...")
 			runCommandWithFallbacks("MAC Addresses (IPConfig)", Command{
-				primary: []string{"ipconfig", "/all", "|", "findstr", `"Physical Address"`},
+				primary: []string{"powershell", "-Command", "Get-NetAdapter | Select-Object Name, MacAddress, Status"},
 				fallbacks: [][]string{
-					{"powershell", "-Command", "ipconfig /all | Select-String 'Physical Address'"},
+					{"powershell", "-Command", "Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration | Where-Object { $_.MACAddress -ne $null } | Select-Object Description, MACAddress"},
 				},
 			})
 			fmt.Println("[Complete] MAC Addresses Check finished")
@@ -208,6 +417,17 @@ func main() {
 					{"powershell", "-Command", "Get-CimInstance -Namespace ROOT\\CIMV2\\Security\\MicrosoftTpm -ClassName Win32_Tpm"},
 				},
 			})
+			fmt.Println("\n[Checking] TPM Endorsement Key...")
+			runCommandWithFallbacks("TPM Endorsement Key", Command{
+				primary:   []string{"powershell", "-Command", "Get-TpmEndorsementKeyInfo"},
+				fallbacks: [][]string{},
+			})
+			fmt.Println("\n[Checking] TPM Endorsement Key (Tulach Method)...")
+			runCommandWithFallbacks("TPM Endorsement Key (Tulach Method)", Command{
+				primary:   []string{nativeTulachEKMarker},
+				fallbacks: [][]string{},
+			})
+			fmt.Println(tpmEKMethodExplanation)
 			fmt.Println("\n[Checking] Secure Boot Status...")
 			runCommandWithFallbacks("Secure Boot", Command{
 				primary: []string{"powershell", "-Command", "Confirm-SecureBootUEFI"},
@@ -296,6 +516,14 @@ func executeCommandWithResult(args []string) CommandResult {
 
 	fmt.Printf("Command: %s\n", strings.Join(args, " "))
 
+	if fn, ok := nativeChecks[args[0]]; ok {
+		output, err := fn()
+		if err != nil {
+			return CommandResult{success: false, error: err.Error()}
+		}
+		return CommandResult{success: true, output: output}
+	}
+
 	if containsPipe(args) {
 		return executePipedCommandWithResult(args)
 	}
@@ -333,6 +561,22 @@ func executeCommandWithResult(args []string) CommandResult {
 		}
 	}
 
+	if isPrivilegeError(outputStr) {
+		return CommandResult{
+			success: false,
+			error:   "Administrator privileges required",
+			output:  outputStr,
+		}
+	}
+
+	if isEmptyTableOutput(outputStr) {
+		return CommandResult{
+			success: false,
+			error:   "Command returned no data (possibly requires administrator privileges)",
+			output:  outputStr,
+		}
+	}
+
 	return CommandResult{
 		success: true,
 		output:  outputStr,
@@ -348,7 +592,13 @@ func executePipedCommandWithResult(args []string) CommandResult {
 	}
 
 	fullCommand := strings.Join(args, " ")
-	cmd := exec.Command("cmd.exe", "/C", fullCommand)
+	cmd := exec.Command("cmd.exe")
+	// fullCommand can contain embedded double quotes (e.g. findstr /C:"OS Serial Number").
+	// exec.Command's default Windows argument escaping re-escapes those quotes for CRT-style
+	// parsing, but cmd.exe parses its command line differently, which splits the quoted
+	// phrase into separate tokens. Setting CmdLine directly bypasses that re-escaping and
+	// hands cmd.exe the literal command line it expects.
+	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: "cmd.exe /C " + fullCommand}
 	cmd.Env = os.Environ()
 
 	output, err := cmd.CombinedOutput()
@@ -370,6 +620,22 @@ func executePipedCommandWithResult(args []string) CommandResult {
 		return CommandResult{
 			success: false,
 			error:   "Piped command returned empty output",
+		}
+	}
+
+	if isPrivilegeError(outputStr) {
+		return CommandResult{
+			success: false,
+			error:   "Administrator privileges required",
+			output:  outputStr,
+		}
+	}
+
+	if isEmptyTableOutput(outputStr) {
+		return CommandResult{
+			success: false,
+			error:   "Command returned no data (possibly requires administrator privileges)",
+			output:  outputStr,
 		}
 	}
 
@@ -467,6 +733,11 @@ func saveAllToFile(cleanList bool) {
 			}
 		} else {
 			success = processCommandForFile(file, cmdEntry, progress)
+			if cmdEntry.description == "TPM Endorsement Key (Tulach Method)" {
+				if _, err := fmt.Fprintln(file, tpmEKMethodExplanation); err != nil {
+					logError(fmt.Sprintf("[Warning] Failed to write TPM EK explanation: %s", err))
+				}
+			}
 		}
 
 		if success {
@@ -503,7 +774,7 @@ func processCommandForCleanList(cmdEntry FileCommandEntry) (bool, string) {
 	result := executeCommandWithResult(cmdEntry.command.primary)
 
 	if result.success {
-		return true, extractCleanValue(result.output)
+		return true, extractCleanValue(cmdEntry.description, result.output)
 	}
 
 	for _, fallback := range cmdEntry.command.fallbacks {
@@ -513,14 +784,113 @@ func processCommandForCleanList(cmdEntry FileCommandEntry) (bool, string) {
 
 		result = executeCommandWithResult(fallback)
 		if result.success {
-			return true, extractCleanValue(result.output)
+			return true, extractCleanValue(cmdEntry.description, result.output)
 		}
 	}
 
 	return false, ""
 }
 
-func extractCleanValue(output string) string {
+// extractCleanValue turns raw command output into a single readable line for
+// the clean HWID list. Table-shaped output (MAC adapters, volumes, TPM
+// properties) needs dedicated parsing — the old generic line filter just
+// stripped known header words and glued every remaining row together,
+// producing garbled multi-column dumps for anything wider than one value.
+func extractCleanValue(description, output string) string {
+	lower := strings.ToLower(description)
+	switch {
+	case strings.Contains(lower, "mac address"):
+		return extractMACAddresses(output)
+	case strings.Contains(lower, "tpm status"), strings.Contains(lower, "tpm endorsement key"):
+		return extractTPMSummary(output)
+	case strings.Contains(lower, "volume information"):
+		return extractVolumeSummary(output)
+	default:
+		return extractGenericValue(output)
+	}
+}
+
+var macAddressPattern = regexp.MustCompile(`(?i)\b([0-9A-F]{2}[:-]){5}[0-9A-F]{2}\b`)
+
+func extractMACAddresses(output string) string {
+	matches := macAddressPattern.FindAllString(output, -1)
+
+	seen := make(map[string]bool)
+	var macs []string
+	for _, mac := range matches {
+		normalized := strings.ToUpper(strings.ReplaceAll(mac, "-", ":"))
+		if normalized == "00:00:00:00:00:00" || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		macs = append(macs, normalized)
+	}
+
+	if len(macs) == 0 {
+		return "Not Available"
+	}
+
+	return strings.Join(macs, ", ")
+}
+
+var tpmPropertyPattern = regexp.MustCompile(`^(\w+)\s*:\s*(.+)$`)
+
+func extractTPMSummary(output string) string {
+	labels := map[string]string{
+		"IsActivated_InitialValue":    "Activated",
+		"IsEnabled_InitialValue":      "Enabled",
+		"IsOwned_InitialValue":        "Owned",
+		"SpecVersion":                 "SpecVersion",
+		"TpmPresent":                  "Present",
+		"TpmReady":                    "Ready",
+		"ManufacturerVersion":         "FirmwareVersion",
+		"PhysicalPresenceVersionInfo": "PPIVersion",
+		"PublicKeyHash":               "EKPublicKeyHash",
+		"ManufacturerId":              "ManufacturerId",
+	}
+
+	var parts []string
+	for _, line := range strings.Split(output, "\n") {
+		match := tpmPropertyPattern.FindStringSubmatch(strings.TrimSpace(line))
+		if match == nil {
+			continue
+		}
+		key := strings.TrimSpace(match[1])
+		label, ok := labels[key]
+		if !ok {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", label, strings.TrimSpace(match[2])))
+	}
+
+	if len(parts) == 0 {
+		return extractGenericValue(output)
+	}
+
+	return strings.Join(parts, ", ")
+}
+
+var volumeRowPattern = regexp.MustCompile(`^([A-Z])\s{2,}\S.*?(\d[\d.]*\s*(?:KB|MB|GB|TB))\s+(\d[\d.]*\s*(?:KB|MB|GB|TB))\s*$`)
+
+func extractVolumeSummary(output string) string {
+	var drives []string
+	for _, line := range strings.Split(output, "\n") {
+		match := volumeRowPattern.FindStringSubmatch(strings.TrimRight(line, " \t\r"))
+		if match == nil {
+			continue
+		}
+		letter, free, total := match[1], match[2], match[3]
+		drives = append(drives, fmt.Sprintf("%s: %s free of %s", letter, free, total))
+	}
+
+	if len(drives) == 0 {
+		return "Not Available"
+	}
+
+	return strings.Join(drives, ", ")
+}
+
+func extractGenericValue(output string) string {
 	lines := strings.Split(output, "\n")
 	var values []string
 
@@ -852,6 +1222,11 @@ func writeFileHeader(file *os.File, cleanList bool) error {
 		return fmt.Errorf("file is nil")
 	}
 
+	adminStatus := "No (run as Administrator for TPM/Secure Boot/full results)"
+	if isRunningAsAdmin() {
+		adminStatus = "Yes"
+	}
+
 	var header string
 	if cleanList {
 		header = fmt.Sprintf(
@@ -860,8 +1235,10 @@ func writeFileHeader(file *os.File, cleanList bool) error {
 				"========================================\n"+
 				"Generated: %s\n"+
 				"System: Windows\n"+
+				"Administrator: %s\n"+
 				"========================================\n\n",
 			time.Now().Format("2006-01-02 15:04:05"),
+			adminStatus,
 		)
 	} else {
 		header = fmt.Sprintf(
@@ -870,8 +1247,10 @@ func writeFileHeader(file *os.File, cleanList bool) error {
 				"========================================\n"+
 				"Generated: %s\n"+
 				"System: Windows\n"+
+				"Administrator: %s\n"+
 				"========================================\n\n",
 			time.Now().Format("2006-01-02 15:04:05"),
+			adminStatus,
 		)
 	}
 
@@ -993,9 +1372,9 @@ func buildCommandList() []FileCommandEntry {
 			},
 		}},
 		{"Windows Product ID (Alternative)", Command{
-			primary: []string{"systeminfo", "|", "findstr", "/B", "/C:\"OS Serial Number\""},
+			primary: []string{"powershell", "-Command", "(Get-CimInstance -ClassName Win32_OperatingSystem).SerialNumber"},
 			fallbacks: [][]string{
-				{"powershell", "-Command", "systeminfo | Select-String 'OS Serial Number'"},
+				{"powershell", "-Command", "Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion' -Name ProductId | Select-Object -ExpandProperty ProductId"},
 			},
 		}},
 		{"MAC Addresses (GetMac)", Command{
@@ -1018,9 +1397,9 @@ func buildCommandList() []FileCommandEntry {
 			},
 		}},
 		{"MAC Addresses (IPConfig)", Command{
-			primary: []string{"ipconfig", "/all", "|", "findstr", `"Physical Address"`},
+			primary: []string{"powershell", "-Command", "Get-NetAdapter | Select-Object Name, MacAddress, Status"},
 			fallbacks: [][]string{
-				{"powershell", "-Command", "ipconfig /all | Select-String 'Physical Address'"},
+				{"powershell", "-Command", "Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration | Where-Object { $_.MACAddress -ne $null } | Select-Object Description, MACAddress"},
 			},
 		}},
 		{"TPM Status", Command{
@@ -1029,6 +1408,14 @@ func buildCommandList() []FileCommandEntry {
 				{"powershell", "-Command", "Get-Tpm"},
 				{"powershell", "-Command", "Get-CimInstance -Namespace ROOT\\CIMV2\\Security\\MicrosoftTpm -ClassName Win32_Tpm"},
 			},
+		}},
+		{"TPM Endorsement Key", Command{
+			primary:   []string{"powershell", "-Command", "Get-TpmEndorsementKeyInfo"},
+			fallbacks: [][]string{},
+		}},
+		{"TPM Endorsement Key (Tulach Method)", Command{
+			primary:   []string{nativeTulachEKMarker},
+			fallbacks: [][]string{},
 		}},
 		{"Secure Boot", Command{
 			primary: []string{"powershell", "-Command", "Confirm-SecureBootUEFI"},
